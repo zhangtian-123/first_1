@@ -121,7 +121,7 @@ QString packVoiceConfig2(const VoiceProps &v)
 
 QString packBeepConfig(const DeviceProps &dev)
 {
-    return QStringLiteral("BEEPSET;%1,%2\r\n")
+    return QStringLiteral("BEEPSET:%1,%2\r\n")
         .arg(dev.buzzerDurMs)
         .arg(dev.buzzerFreq);
 }
@@ -129,17 +129,17 @@ QString packBeepConfig(const DeviceProps &dev)
 QString packBeepTest(const DeviceProps &dev)
 {
     Q_UNUSED(dev);
-    return QStringLiteral("BEEP\r\n");
+    return QStringLiteral("BEEPTEST\r\n");
 }
 
 QString packTestSolid(int colorIndex)
 {
-    return QStringLiteral("LEDTEST;%1\r\n").arg(colorIndex);
+    return QStringLiteral("LEDTEST:%1\r\n").arg(colorIndex);
 }
 
 QString packTestAllOff()
 {
-    return QStringLiteral("LEDTEST;0\r\n");
+    return QStringLiteral("LEDTEST:0\r\n");
 }
 
 QString packVoiceTest(const QString &text, int style)
