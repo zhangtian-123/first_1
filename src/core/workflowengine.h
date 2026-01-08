@@ -47,6 +47,7 @@ signals:
     void actionStarted(int row, const QString& actionType, const QString& paramText);
     void actionFinished(int row, bool ok, int code, const QString& msg);
     void progressUpdated(int currentStep, qint64 deviceMs);
+    void rerunMarked(const QString& flowName);
     void logLine(const QString& line);
 
 public slots:

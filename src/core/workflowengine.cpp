@@ -139,14 +139,28 @@ bool WorkflowEngine::runNextSegment()
 
 void WorkflowEngine::markCurrentOrPreviousSegmentForRerun()
 {
+    int target = -1;
     if (m_segmentRunning)
     {
         if (m_currentSegmentIndex >= 0)
-            m_markedRerunSegment = m_currentSegmentIndex;
-        return;
+            target = m_currentSegmentIndex;
     }
-    if (m_currentSegmentIndex >= 0)
-        m_markedRerunSegment = m_currentSegmentIndex;
+    else if (m_currentSegmentIndex >= 0)
+    {
+        target = m_currentSegmentIndex;
+    }
+
+    if (target < 0 || target >= m_segments.size())
+        return;
+    m_markedRerunSegment = target;
+
+    const Segment& seg = m_segments[target];
+    if (seg.startIndex >= 0 && seg.startIndex < m_actions.size())
+    {
+        const QString flowName = m_actions[seg.startIndex].flowName;
+        if (!flowName.isEmpty())
+            emit rerunMarked(flowName);
+    }
 }
 
 void WorkflowEngine::sendConfigs()
@@ -192,7 +206,7 @@ void WorkflowEngine::onSerialFrame(const QString& frame)
             m_deviceBaseMs = pr.startTimeMs;
             m_hostBaseElapsedMs = m_runTimer.isValid() ? m_runTimer.elapsed() : 0;
         }
-        emit progressUpdated(pr.currentStep, nowDeviceMs());
+        emit progressUpdated(pr.currentStep, pr.startTimeMs);
     }
 }
 

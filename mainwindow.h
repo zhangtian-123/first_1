@@ -93,8 +93,8 @@ private slots:
     // Engine callbacks
     void onEngineIdle();
     void onEngineSegmentStarted(const QString& name, int startRow, int endRow);
-    void onEngineActionFinished(int row, bool ok, int code, const QString& msg);
     void onEngineProgressUpdated(int currentStep, qint64 deviceMs);
+    void onEngineRerunMarked(const QString& flowName);
     void onEngineLogLine(const QString& line);
 
 private:
@@ -119,6 +119,7 @@ private:
     void sendTestAllOff();
     HotkeyConfig readHotkeysFromUi() const;
     QKeySequence readKeySequenceFromEdit(const QKeySequenceEdit* edit) const;
+    void applyQueueColumnLayout();
 
 private:
     enum class UiRunState { NoConfig, Ready, Started, Running };
@@ -126,6 +127,7 @@ private:
 
     SettingsData* m_settings = nullptr;
     QString m_excelPath;
+    QString m_currentFlowName;
     bool m_configApplied = false;
 
     QPointer<SerialService>  m_serial;

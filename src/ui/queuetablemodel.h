@@ -9,8 +9,8 @@
 #include <QHash>
 #include <QVector>
 
-#include "../core/excelimporter.h" // HeaderCol/HeaderField
-#include "../core/models.h"        // ActionItem
+#include "../core/excelimporter.h"
+#include "../core/models.h"
 
 class QueueTableModel : public QAbstractTableModel
 {
@@ -19,12 +19,20 @@ public:
     explicit QueueTableModel(QObject* parent = nullptr);
 
     void clear();
-    void setHeaderColumns(const QVector<HeaderCol>& headerCols);
+    void setTableRows(const QVector<ExcelTableRow>& rows, int columnStart, int columnCount);
     void setActions(const QVector<ActionItem>& actions);
 
     int rowForFlowName(const QString& flowName) const;
-    void clearStatuses();
-    void setStatusForFlowName(const QString& flowName, const QString& text, const QColor& bg);
+    void clearFlowStates();
+    void setFlowRunning(const QString& flowName);
+    void setFlowDone(const QString& flowName);
+    void setFlowRerunMarked(const QString& flowName);
+
+    void clearStepTimes();
+    void setStepRunning(const QString& flowName, int stepIndex);
+    void setStepTime(const QString& flowName, int stepIndex, qint64 deviceMs);
+    int stepCountForFlow(const QString& flowName) const;
+    void setLedColorMap(const QHash<int, QColor>& colors);
 
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     int columnCount(const QModelIndex& parent = QModelIndex()) const override;
@@ -33,36 +41,28 @@ public:
     Qt::ItemFlags flags(const QModelIndex& index) const override;
 
 private:
-    struct SegmentRow
+    enum class FlowState { None, Running, Done };
+    enum class StepState { None, Running, Done };
+
+    struct DisplayRow
     {
+        bool isHeader = false;
         QString flow;
-        QString mode;
-        QVector<int> leds; // size = max LED index
-
-        bool hasBeep = false;
-        bool beepDefault = false;
-        int beepDurMs = 0;
-
-        bool hasVoice = false;
-        QString voice;
-        int voiceSet = 1;
-        bool hasVoiceSet = false;
-
-        bool hasDelay = false;
-        int delayMs = 0;
-
-        QString statusText;
-        QColor statusBg;
-        bool hasStatusBg = false;
+        QVector<QString> cells;
+        QVector<int> ledColumns;
+        QVector<int> timeColumns;
+        FlowState flowState = FlowState::None;
+        bool rerunMarked = false;
+        QVector<StepState> timeStates;
     };
 
-    void rebuildRows();
-
-private:
-    QVector<HeaderCol> m_headerCols;
-    int m_maxLedIdx = 0;
+    void setFlowState(const QString& flowName, FlowState state);
+    void emitTimeCellChanged(int rowIdx, int cellIdx);
 
     QVector<ActionItem> m_actions;
-    QVector<SegmentRow> m_rows;
+    QVector<DisplayRow> m_rows;
     QHash<QString, int> m_flowRow;
+    QHash<int, QColor> m_ledColorMap;
+    int m_tableColumnStart = 1;
+    int m_tableColumnCount = 0;
 };

@@ -228,8 +228,11 @@ QWidget* MainWindow::buildStatusPage()
     m_tblQueue->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_tblQueue->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_tblQueue->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_tblQueue->horizontalHeader()->setStretchLastSection(true);
-    m_tblQueue->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_tblQueue->horizontalHeader()->setStretchLastSection(false);
+    m_tblQueue->horizontalHeader()->setSectionResizeMode(QHeaderView::Fixed);
+    m_tblQueue->horizontalHeader()->setSectionsMovable(false);
+    m_tblQueue->horizontalHeader()->setDefaultAlignment(Qt::AlignCenter);
+    m_tblQueue->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
 
     mid->addLayout(left, 0);
     mid->addWidget(m_tblQueue, 1);
@@ -521,8 +524,8 @@ void MainWindow::wireSignals()
     connect(m_engine, &WorkflowEngine::idle, this, &MainWindow::onEngineIdle);
     connect(m_engine, &WorkflowEngine::segmentStarted, this, &MainWindow::onEngineSegmentStarted);
     connect(m_engine, &WorkflowEngine::actionStarted, this, [](int, const QString&, const QString&) {});
-    connect(m_engine, &WorkflowEngine::actionFinished, this, &MainWindow::onEngineActionFinished);
     connect(m_engine, &WorkflowEngine::progressUpdated, this, &MainWindow::onEngineProgressUpdated);
+    connect(m_engine, &WorkflowEngine::rerunMarked, this, &MainWindow::onEngineRerunMarked);
     connect(m_engine, &WorkflowEngine::logLine, this, &MainWindow::onEngineLogLine);
     connect(m_serial, &SerialService::rxRaw, m_engine, &WorkflowEngine::onSerialFrame);
 }
@@ -546,6 +549,27 @@ void MainWindow::applyUiState()
     case UiRunState::Started:  m_lblRunState->setText(tr("状态：Ready，等待下一段")); break;
     case UiRunState::Running:  m_lblRunState->setText(tr("状态：执行中")); break;
     }
+}
+
+void MainWindow::applyQueueColumnLayout()
+{
+    if (!m_tblQueue || !m_queueModel)
+        return;
+
+    QHeaderView* header = m_tblQueue->horizontalHeader();
+    header->setStretchLastSection(false);
+    header->setSectionResizeMode(QHeaderView::Fixed);
+    header->setSectionsMovable(false);
+    header->setDefaultAlignment(Qt::AlignCenter);
+
+    QFontMetrics fm(m_tblQueue->font());
+    int width = fm.horizontalAdvance(QStringLiteral("工作模式")) + 24;
+    if (width < 40)
+        width = 40;
+
+    const int cols = m_queueModel->columnCount();
+    for (int c = 0; c < cols; ++c)
+        m_tblQueue->setColumnWidth(c, width);
 }
 
 bool MainWindow::loadSettings()
@@ -592,20 +616,69 @@ void MainWindow::onApplyConfig()
         QMessageBox::warning(this, tr("导入失败"), err);
         return;
     }
-
-    // LED count from Excel overrides setting
+    m_currentFlowName.clear();
+    QHash<int, QColor> colorMap;
     if (m_settings)
     {
-        const int ledCountFromExcel = m_importer->ledCount();
+        for (const auto& c : m_settings->colors)
+        {
+            if (c.index > 0 && c.rgb.isValid())
+                colorMap.insert(c.index, c.rgb);
+        }
+        if (!colorMap.isEmpty())
+        {
+            for (const auto& a : m_importer->actions())
+            {
+                if (a.type != ActionType::L)
+                    continue;
+                for (int v : a.ledColors)
+                {
+                    if (v > 0 && !colorMap.contains(v))
+                    {
+                        QMessageBox::warning(this, tr("导入失败"), tr("颜色编号 %1 不在颜色表").arg(v));
+                        return;
+                    }
+                }
+            }
+        }
+        else
+        {
+            for (const auto& a : m_importer->actions())
+            {
+                if (a.type != ActionType::L)
+                    continue;
+                for (int v : a.ledColors)
+                {
+                    if (v > 0)
+                    {
+                        QMessageBox::warning(this, tr("导入失败"), tr("颜色表为空，无法使用颜色编号 %1").arg(v));
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // LED count from Excel overrides setting (pad to at least 5)
+    if (m_settings)
+    {
+        int ledCountFromExcel = m_importer->ledCount();
+        if (ledCountFromExcel > 0 && ledCountFromExcel < 5)
+            ledCountFromExcel = 5;
         if (ledCountFromExcel > 0)
         {
             m_settings->device.ledCount = ledCountFromExcel;
             m_spLedCount->setValue(ledCountFromExcel);
         }
     }
-    m_queueModel->setHeaderColumns(m_importer->headerColumns());
+    m_queueModel->setTableRows(m_importer->tableRows(),
+                               m_importer->tableColumnStart(),
+                               m_importer->tableColumnCount());
     m_queueModel->setActions(m_importer->actions());
-    m_queueModel->clearStatuses();
+    m_queueModel->setLedColorMap(colorMap);
+    m_queueModel->clearFlowStates();
+    m_queueModel->clearStepTimes();
+    applyQueueColumnLayout();
 
     m_configApplied = true;
     m_uiState = UiRunState::Ready;
@@ -656,8 +729,8 @@ void MainWindow::onStart()
     m_engine->beginRun();
     m_engine->sendConfigs();
     m_engine->loadPlan(resolved);
-    m_queueModel->setActions(m_engine->plan());
-    m_queueModel->clearStatuses();
+    m_queueModel->clearFlowStates();
+    m_queueModel->clearStepTimes();
 
     m_uiState = UiRunState::Started;
     applyUiState();
@@ -684,9 +757,16 @@ void MainWindow::onReset()
     m_engine->resetRun();
     m_uiState = m_configApplied ? UiRunState::Ready : UiRunState::NoConfig;
     m_lblHint->clear();
+    m_currentFlowName.clear();
     if (m_importer)
+    {
+        m_queueModel->setTableRows(m_importer->tableRows(),
+                                   m_importer->tableColumnStart(),
+                                   m_importer->tableColumnCount());
         m_queueModel->setActions(m_importer->actions());
-    m_queueModel->clearStatuses();
+    }
+    m_queueModel->clearFlowStates();
+    m_queueModel->clearStepTimes();
     applyUiState();
 }
 
@@ -1337,24 +1417,35 @@ void MainWindow::onEngineSegmentStarted(const QString &name, int startRow, int e
     if (m_engine && startRow >= 0 && startRow < m_engine->plan().size())
     {
         const QString flow = m_engine->plan()[startRow].flowName;
-        m_queueModel->setStatusForFlowName(flow, tr("RUNNING"), QColor(255, 255, 200));
+        m_currentFlowName = flow;
+        m_queueModel->setFlowRunning(flow);
+        m_queueModel->setStepRunning(flow, 1);
     }
-}
-
-void MainWindow::onEngineActionFinished(int row, bool ok, int code, const QString &msg)
-{
-    if (!m_engine || row < 0 || row >= m_engine->plan().size())
-        return;
-    const QString flow = m_engine->plan()[row].flowName;
-    m_queueModel->setStatusForFlowName(
-        flow,
-        ok ? tr("OK") : tr("FAIL(%1) %2").arg(code).arg(msg),
-        ok ? QColor(200, 255, 200) : QColor(255, 200, 200));
 }
 
 void MainWindow::onEngineProgressUpdated(int currentStep, qint64 deviceMs)
 {
     m_lblHint->setText(tr("下位机进度：Step=%1  DeviceMs=%2").arg(currentStep).arg(deviceMs));
+    if (!m_currentFlowName.isEmpty())
+    {
+        m_queueModel->setStepTime(m_currentFlowName, currentStep, deviceMs);
+        const int stepCount = m_queueModel->stepCountForFlow(m_currentFlowName);
+        if (stepCount > 0 && currentStep >= stepCount)
+        {
+            m_queueModel->setFlowDone(m_currentFlowName);
+            m_currentFlowName.clear();
+        }
+        else
+        {
+            m_queueModel->setStepRunning(m_currentFlowName, currentStep + 1);
+        }
+    }
+}
+
+void MainWindow::onEngineRerunMarked(const QString& flowName)
+{
+    if (!flowName.isEmpty() && m_queueModel)
+        m_queueModel->setFlowRerunMarked(flowName);
 }
 
 void MainWindow::onEngineLogLine(const QString &line)

@@ -37,7 +37,9 @@ void ExcelImporter::clear()
     m_sourcePath.clear();
     m_actions.clear();
     m_ledColumnCount = 0;
-    m_headerCols.clear();
+    m_tableColumnStart = 1;
+    m_tableColumnCount = 0;
+    m_tableRows.clear();
 }
 
 bool ExcelImporter::hasActionType(ActionType t) const
@@ -68,15 +70,24 @@ bool ExcelImporter::hasRandomColorZero() const
 // ----------------------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------------------
-static bool isRowEmpty(Document& doc, int row, const QVector<int>& columns)
+static bool isRowEmpty(Document& doc, int row, int firstCol, int lastCol)
 {
-    for (int c : columns)
+    for (int c = firstCol; c <= lastCol; ++c)
     {
         const QVariant v = doc.read(row, c);
         if (v.isValid() && !v.toString().trimmed().isEmpty())
             return false;
     }
     return true;
+}
+
+static QVector<QString> readRowCells(Document& doc, int row, int firstCol, int lastCol)
+{
+    QVector<QString> cells;
+    cells.reserve(lastCol - firstCol + 1);
+    for (int c = firstCol; c <= lastCol; ++c)
+        cells.push_back(doc.read(row, c).toString().trimmed());
+    return cells;
 }
 
 static QString joinIntList(const QVector<int>& values)
@@ -86,6 +97,272 @@ static QString joinIntList(const QVector<int>& values)
     for (int v : values)
         tmp << QString::number(v);
     return tmp.join(",");
+}
+
+static QString headerKey(const QString& text)
+{
+    QString k = text.trimmed().toLower();
+    k.remove(' ');
+    return k;
+}
+
+static bool isTokenLed(const QString& text)
+{
+    return headerKey(text) == QStringLiteral("led");
+}
+
+static bool isTokenBeep(const QString& text)
+{
+    return headerKey(text) == QStringLiteral("beep");
+}
+
+static bool isTokenVoice(const QString& text)
+{
+    return headerKey(text) == QStringLiteral("voice");
+}
+
+static bool isTokenDelay(const QString& text)
+{
+    return headerKey(text) == QStringLiteral("delay");
+}
+
+static bool isTokenMode(const QString& text)
+{
+    const QString t = text.trimmed();
+    if (t == QStringLiteral("工作模式"))
+        return true;
+    const QString k = headerKey(text);
+    return (k == QStringLiteral("mode") || k == QStringLiteral("workmode"));
+}
+
+static bool isTokenStyle(const QString& text)
+{
+    const QString t = text.trimmed();
+    if (t == QStringLiteral("风格") || t == QStringLiteral("语音风格"))
+        return true;
+    const QString k = headerKey(text);
+    return (k == QStringLiteral("voiceset")
+            || k == QStringLiteral("voiceset1")
+            || k == QStringLiteral("voiceset2")
+            || k == QStringLiteral("voicestyle")
+            || k == QStringLiteral("voice_style")
+            || k == QStringLiteral("style"));
+}
+
+static bool isHeaderRow(const QVector<QString>& cells)
+{
+    QRegularExpression ledRegex(QStringLiteral("^LED\\d+$"), QRegularExpression::CaseInsensitiveOption);
+    for (const auto& cell : cells)
+    {
+        if (cell.trimmed().isEmpty())
+            continue;
+        if (isTokenLed(cell) || isTokenBeep(cell) || isTokenVoice(cell)
+            || isTokenDelay(cell) || isTokenMode(cell) || isTokenStyle(cell))
+            return true;
+        if (ledRegex.match(cell).hasMatch())
+            return true;
+    }
+    return false;
+}
+
+namespace
+{
+enum class BlockType
+{
+    Led,
+    Beep,
+    Voice,
+    Delay
+};
+
+struct BlockDef
+{
+    BlockType type = BlockType::Led;
+    int ledMarkerCol = -1;
+    int modeCol = -1;
+    QVector<int> ledCols;
+    int beepCol = -1;
+    int voiceCol = -1;
+    int voiceStyleCol = -1;
+    int delayCol = -1;
+};
+
+struct HeaderDef
+{
+    QVector<BlockDef> blocks;
+    QVector<int> ledCols; // absolute Excel columns (1-based)
+    int ledMarkerCol = -1;
+    int modeCol = -1;
+    int voiceCol = -1;
+    int voiceStyleCol = -1;
+    int delayCol = -1;
+    int beepCol = -1;
+};
+}
+
+static bool parseHeaderRow(const QVector<QString>& cells,
+                           int firstCol,
+                           int lastCol,
+                           HeaderDef& out,
+                           QString& errMsg)
+{
+    out = HeaderDef();
+    errMsg.clear();
+
+    bool hasLed = false;
+    bool hasBeep = false;
+    bool hasVoice = false;
+    bool hasDelay = false;
+
+    QRegularExpression ledRegex(QStringLiteral("^LED(\\d+)$"), QRegularExpression::CaseInsensitiveOption);
+
+    int col = firstCol;
+    while (col <= lastCol)
+    {
+        const QString text = cells[col - firstCol].trimmed();
+        if (text.isEmpty())
+        {
+            ++col;
+            continue;
+        }
+
+        if (isTokenLed(text))
+        {
+            if (hasLed)
+            {
+                errMsg = QStringLiteral("Header row has multiple LED blocks.");
+                return false;
+            }
+            const int modeCol = col + 1;
+            if (modeCol > lastCol || !isTokenMode(cells[modeCol - firstCol]))
+            {
+                errMsg = QStringLiteral("LED block must be followed by 工作模式.");
+                return false;
+            }
+
+            QVector<int> ledCols;
+            int scan = modeCol + 1;
+            while (scan <= lastCol)
+            {
+                const QString h = cells[scan - firstCol].trimmed();
+                if (h.isEmpty())
+                    break;
+                if (isTokenLed(h) || isTokenBeep(h) || isTokenVoice(h)
+                    || isTokenDelay(h) || isTokenMode(h) || isTokenStyle(h))
+                    break;
+                const auto m = ledRegex.match(h);
+                if (!m.hasMatch())
+                    break;
+                ledCols.push_back(scan);
+                ++scan;
+            }
+
+            if (ledCols.isEmpty())
+            {
+                errMsg = QStringLiteral("LED block must contain LED1..LEDn columns.");
+                return false;
+            }
+
+            for (int i = 0; i < ledCols.size(); ++i)
+            {
+                const QString h = cells[ledCols[i] - firstCol].trimmed();
+                const auto m = ledRegex.match(h);
+                const int idx = m.hasMatch() ? m.captured(1).toInt() : -1;
+                if (idx != i + 1)
+                {
+                    errMsg = QStringLiteral("LED columns must be sequential from LED1.");
+                    return false;
+                }
+            }
+
+            BlockDef b;
+            b.type = BlockType::Led;
+            b.ledMarkerCol = col;
+            b.modeCol = modeCol;
+            b.ledCols = ledCols;
+            out.blocks.push_back(b);
+            out.ledCols = ledCols;
+            out.ledMarkerCol = col;
+            out.modeCol = modeCol;
+            hasLed = true;
+            col = scan;
+            continue;
+        }
+
+        if (isTokenBeep(text))
+        {
+            if (hasBeep)
+            {
+                errMsg = QStringLiteral("Header row has multiple BEEP columns.");
+                return false;
+            }
+            BlockDef b;
+            b.type = BlockType::Beep;
+            b.beepCol = col;
+            out.blocks.push_back(b);
+            out.beepCol = col;
+            hasBeep = true;
+            ++col;
+            continue;
+        }
+
+        if (isTokenVoice(text))
+        {
+            if (hasVoice)
+            {
+                errMsg = QStringLiteral("Header row has multiple VOICE blocks.");
+                return false;
+            }
+            const int styleCol = col + 1;
+            if (styleCol > lastCol || !isTokenStyle(cells[styleCol - firstCol]))
+            {
+                errMsg = QStringLiteral("VOICE block must be followed by 风格.");
+                return false;
+            }
+            BlockDef b;
+            b.type = BlockType::Voice;
+            b.voiceCol = col;
+            b.voiceStyleCol = styleCol;
+            out.blocks.push_back(b);
+            out.voiceCol = col;
+            out.voiceStyleCol = styleCol;
+            hasVoice = true;
+            col = styleCol + 1;
+            continue;
+        }
+
+        if (isTokenDelay(text))
+        {
+            if (hasDelay)
+            {
+                errMsg = QStringLiteral("Header row has multiple DELAY columns.");
+                return false;
+            }
+            BlockDef b;
+            b.type = BlockType::Delay;
+            b.delayCol = col;
+            out.blocks.push_back(b);
+            out.delayCol = col;
+            hasDelay = true;
+            ++col;
+            continue;
+        }
+
+        if (isTokenMode(text) || isTokenStyle(text) || ledRegex.match(text).hasMatch())
+        {
+            errMsg = QStringLiteral("Header row has misplaced LED/VOICE columns.");
+            return false;
+        }
+
+        ++col; // ignore unknown header text
+    }
+
+    if (out.blocks.isEmpty())
+    {
+        errMsg = QStringLiteral("Header row has no valid blocks.");
+        return false;
+    }
+    return true;
 }
 
 // ----------------------------------------------------------------------------
@@ -149,342 +426,299 @@ bool ExcelImporter::loadXlsx(const QString &path, QString &errMsg)
         return false;
     }
 
-    const int firstRow = range.firstRow();   // typically 1
+    const int firstRow = range.firstRow();
     const int lastRow  = range.lastRow();
     const int firstCol = range.firstColumn();
     const int lastCol  = range.lastColumn();
 
-    // Spec: header must be in row 1.
-    if (firstRow != 1)
-    {
-        errMsg = QStringLiteral("Header must be at row 1 (found first row=%1).").arg(firstRow);
-        return false;
-    }
+    m_tableColumnStart = firstCol;
+    m_tableColumnCount = lastCol - firstCol + 1;
 
-    if (lastRow <= firstRow)
-    {
-        errMsg = QStringLiteral("Excel has no data rows under the header.");
-        return false;
-    }
-
-    // ----------------------------
-    // Read header row (row 1)
-    // ----------------------------
-    QVector<QString> headers;
-    headers.reserve(lastCol - firstCol + 1);
-    for (int c = firstCol; c <= lastCol; ++c)
-        headers.push_back(doc.read(firstRow, c).toString().trimmed());
-
-    int workModeCol = -1;
-    int beepCol = -1;
-    int voiceCol = -1;
-    int delayCol = -1;
-    int voiceSetCol = -1;
-    struct LedColInfo { int col; int idx; };
-    QVector<LedColInfo> ledCols;
-    m_headerCols.clear();
-
-    QRegularExpression ledRegex(QStringLiteral("^led(\\d+)$"), QRegularExpression::CaseInsensitiveOption);
-
-    auto headerKey = [](const QString& h)->QString {
-        QString k = h.trimmed().toLower();
-        k.replace(" ", "");
-        return k;
-    };
-
-    for (int idx = 0; idx < headers.size(); ++idx)
-    {
-        const QString raw = headers[idx];
-        const QString key = headerKey(raw);
-        const int col = firstCol + idx;
-
-        if (key == QStringLiteral("工作模式") || key == QStringLiteral("mode") || key == QStringLiteral("workmode"))
-        {
-            workModeCol = col;
-            m_headerCols.push_back({HeaderField::Mode, 0});
-            continue;
-        }
-
-        const auto m = ledRegex.match(raw);
-        if (m.hasMatch())
-        {
-            const int ledIdx = m.captured(1).toInt();
-            ledCols.push_back({col, ledIdx});
-            m_headerCols.push_back({HeaderField::LED, ledIdx});
-            continue;
-        }
-
-        if (key == QStringLiteral("beep"))
-        {
-            beepCol = col;
-            m_headerCols.push_back({HeaderField::Beep, 0});
-            continue;
-        }
-        if (key == QStringLiteral("voice"))
-        {
-            voiceCol = col;
-            m_headerCols.push_back({HeaderField::Voice, 0});
-            continue;
-        }
-        if (key == QStringLiteral("delay"))
-        {
-            delayCol = col;
-            m_headerCols.push_back({HeaderField::Delay, 0});
-            continue;
-        }
-        if (key == QStringLiteral("风格")
-            || key == QStringLiteral("语音风格")
-            || key == QStringLiteral("voiceset")
-            || key == QStringLiteral("voiceset1")
-            || key == QStringLiteral("voiceset2")
-            || key == QStringLiteral("voicestyle")
-            || key == QStringLiteral("voice_style")
-            || key == QStringLiteral("style"))
-        {
-            voiceSetCol = col;
-            m_headerCols.push_back({HeaderField::VoiceSet, 0});
-            continue;
-        }
-    }
-
-    std::sort(ledCols.begin(), ledCols.end(), [](const LedColInfo& a, const LedColInfo& b){
-        return a.idx < b.idx;
-    });
-    ledCols.erase(std::unique(ledCols.begin(), ledCols.end(), [](const LedColInfo& a, const LedColInfo& b){
-        return a.idx == b.idx;
-    }), ledCols.end());
-
-    if (workModeCol < 0)
-    {
-        errMsg = QStringLiteral("Header must contain column \"工作模式\".");
-        return false;
-    }
-    if (ledCols.isEmpty())
-    {
-        errMsg = QStringLiteral("Header must contain at least one LED column (LED1..LEDn).");
-        return false;
-    }
-    if (ledCols.size() > 10)
-    {
-        errMsg = QStringLiteral("LED column count exceeds the limit (10).");
-        return false;
-    }
-
-    // ensure LED indices are 1..n sequential
-    for (int i = 0; i < ledCols.size(); ++i)
-    {
-        if (ledCols[i].idx != i + 1)
-        {
-            errMsg = QStringLiteral("LED columns must be sequential from LED1..LED%1.").arg(ledCols.size());
-            return false;
-        }
-    }
-
-    m_ledColumnCount = ledCols.size();
-    // Columns to check for "empty row" detection
-    QVector<int> checkCols;
-    for (const auto& lc : ledCols) checkCols << lc.col;
-    checkCols << workModeCol;
-    if (beepCol >= 0) checkCols << beepCol;
-    if (voiceCol >= 0) checkCols << voiceCol;
-    if (delayCol >= 0) checkCols << delayCol;
-    if (voiceSetCol >= 0) checkCols << voiceSetCol;
-
-    auto readString = [&](int row, int col)->QString {
-        const QVariant v = doc.read(row, col);
-        if (!v.isValid())
-            return QString();
-        return v.toString().trimmed();
-    };
-
-    // ----------------------------
-    // Parse each data row (contiguous block starting at row 2)
-    // ----------------------------
+    HeaderDef currentHeader;
+    bool hasHeader = false;
     int dataRowIndex = 0;
-    for (int r = firstRow + 1; r <= lastRow; ++r)
+    int maxDisplayCols = 0;
+
+    auto buildDisplayCells = [&](const QVector<QString>& rawCells,
+                                 const HeaderDef& header,
+                                 bool isHeaderRow,
+                                 QVector<int>* outRawToDisplay,
+                                 QVector<int>* outTimeCols)->QVector<QString>
     {
-        if (isRowEmpty(doc, r, checkCols))
+        QVector<int> blockEnds;
+        blockEnds.reserve(header.blocks.size());
+        for (const auto& block : header.blocks)
         {
-            // Stop at the first empty row; ignore anything below.
-            break;
-        }
-
-        const QString modeCell = readString(r, workModeCol);
-        if (modeCell.isEmpty())
-        {
-            errMsg = QStringLiteral("Row %1: 工作模式 is empty.").arg(r);
-            return false;
-        }
-
-        QString mode = normalizeLedMode(modeCell).toUpper();
-        if (mode != QStringLiteral("ALL") && mode != QStringLiteral("SEQ") && mode != QStringLiteral("RAND"))
-        {
-            errMsg = QStringLiteral("Row %1: 工作模式 \"%2\" is invalid (must be ALL/SEQ/RAND).")
-                         .arg(r)
-                         .arg(modeCell);
-            return false;
-        }
-
-        QVector<int> ledColors;
-        ledColors.reserve(ledCols.size());
-        for (const auto& lc : ledCols)
-        {
-            const QString text = readString(r, lc.col);
-            if (text.isEmpty())
+            int endCol = -1;
+            switch (block.type)
             {
-                ledColors.push_back(0);
-                continue;
+            case BlockType::Led:
+                endCol = block.ledCols.isEmpty() ? block.modeCol : block.ledCols.last();
+                break;
+            case BlockType::Beep:
+                endCol = block.beepCol;
+                break;
+            case BlockType::Voice:
+                endCol = block.voiceStyleCol;
+                break;
+            case BlockType::Delay:
+                endCol = block.delayCol;
+                break;
             }
-            bool ok=false;
-            const int v = text.toInt(&ok);
-            if (!ok || v < 0)
+            if (endCol > 0)
+                blockEnds.push_back(endCol);
+        }
+
+        QVector<QString> display;
+        display.reserve(rawCells.size() + blockEnds.size());
+        if (outRawToDisplay)
+        {
+            outRawToDisplay->clear();
+            outRawToDisplay->resize(rawCells.size());
+        }
+        if (outTimeCols)
+            outTimeCols->clear();
+
+        int blockIdx = 0;
+        for (int rawIdx = 0; rawIdx < rawCells.size(); ++rawIdx)
+        {
+            display.push_back(rawCells[rawIdx]);
+            if (outRawToDisplay)
+                (*outRawToDisplay)[rawIdx] = display.size() - 1;
+
+            const int absCol = firstCol + rawIdx;
+            if (blockIdx < blockEnds.size() && absCol == blockEnds[blockIdx])
             {
-                errMsg = QStringLiteral("Row %1: LED column contains invalid value \"%2\" (must be >=0).")
-                             .arg(r)
-                             .arg(text);
+                display.push_back(isHeaderRow ? QStringLiteral("时间") : QString());
+                if (outTimeCols)
+                    outTimeCols->push_back(display.size() - 1);
+                ++blockIdx;
+            }
+        }
+        return display;
+    };
+
+    for (int r = firstRow; r <= lastRow; ++r)
+    {
+        if (isRowEmpty(doc, r, firstCol, lastCol))
+            break;
+
+        const QVector<QString> rawCells = readRowCells(doc, r, firstCol, lastCol);
+        if (isHeaderRow(rawCells))
+        {
+            HeaderDef parsed;
+            QString headerErr;
+            if (!parseHeaderRow(rawCells, firstCol, lastCol, parsed, headerErr))
+            {
+                errMsg = QStringLiteral("Row %1: %2").arg(r).arg(headerErr);
                 return false;
             }
-                ledColors.push_back(v);
+            if (!parsed.ledCols.isEmpty() && parsed.ledCols.size() > 20)
+            {
+                errMsg = QStringLiteral("Row %1: LED column count exceeds the limit (20).").arg(r);
+                return false;
+            }
+
+            ExcelTableRow row;
+            row.isHeader = true;
+            row.excelRow = r;
+            row.cells = buildDisplayCells(rawCells, parsed, true, nullptr, &row.timeColumns);
+            m_tableRows.push_back(row);
+
+            currentHeader = parsed;
+            hasHeader = true;
+            m_ledColumnCount = std::max(m_ledColumnCount, static_cast<int>(parsed.ledCols.size()));
+            int lastNonEmpty = -1;
+            for (int i = row.cells.size() - 1; i >= 0; --i)
+            {
+                if (!row.cells[i].trimmed().isEmpty())
+                {
+                    lastNonEmpty = i;
+                    break;
+                }
+            }
+            if (lastNonEmpty >= 0)
+                maxDisplayCols = std::max(maxDisplayCols, lastNonEmpty + 1);
+            continue;
         }
 
-        const QString flowName = QStringLiteral("Row%1").arg(++dataRowIndex);
-
-        int voiceSet = 1;
-        if (voiceSetCol >= 0)
+        if (!hasHeader)
         {
-            const QString vsText = readString(r, voiceSetCol);
-            if (!vsText.isEmpty())
+            errMsg = QStringLiteral("Row %1: data row appears before any header row.").arg(r);
+            return false;
+        }
+
+        const QString flowName = QStringLiteral("流程%1").arg(++dataRowIndex);
+
+        ExcelTableRow row;
+        row.isHeader = false;
+        row.excelRow = r;
+        row.flowName = flowName;
+        QVector<int> rawToDisplay;
+        QVector<int> blockTimeCols;
+        row.cells = buildDisplayCells(rawCells, currentHeader, false, &rawToDisplay, &blockTimeCols);
+        row.ledColumns.reserve(currentHeader.ledCols.size());
+        for (int col : currentHeader.ledCols)
+        {
+            const int rawIdx = col - firstCol;
+            if (rawIdx >= 0 && rawIdx < rawToDisplay.size())
+                row.ledColumns.push_back(rawToDisplay[rawIdx]);
+        }
+
+        auto cellAt = [&](int col)->QString {
+            if (col < firstCol || col > lastCol)
+                return QString();
+            return rawCells[col - firstCol].trimmed();
+        };
+
+        for (int bi = 0; bi < currentHeader.blocks.size(); ++bi)
+        {
+            const auto& block = currentHeader.blocks[bi];
+            switch (block.type)
             {
-                bool ok = false;
-                const int v = vsText.toInt(&ok);
-                if (!ok || (v != 1 && v != 2))
+            case BlockType::Led:
+            {
+                const QString modeCell = cellAt(block.modeCol);
+                if (modeCell.isEmpty())
                 {
-                    errMsg = QStringLiteral("Row %1: 风格 value \"%2\" is invalid (must be 1 or 2).")
-                                 .arg(r)
-                                 .arg(vsText);
+                    errMsg = QStringLiteral("Row %1: work mode is empty.").arg(r);
                     return false;
                 }
-                voiceSet = v;
+
+                const QString mode = normalizeLedMode(modeCell).toUpper();
+                if (mode != QStringLiteral("ALL") && mode != QStringLiteral("SEQ") && mode != QStringLiteral("RAND"))
+                {
+                    errMsg = QStringLiteral("Row %1: work mode \"%2\" is invalid (must be ALL/SEQ/RAND).").arg(r).arg(modeCell);
+                    return false;
+                }
+
+                QVector<int> ledColors;
+                ledColors.reserve(block.ledCols.size());
+                for (int col : block.ledCols)
+                {
+                    const QString text = cellAt(col);
+                    if (text.isEmpty())
+                    {
+                        ledColors.push_back(0);
+                        continue;
+                    }
+                    bool ok=false;
+                    const int v = text.toInt(&ok);
+                    if (!ok || v < 0)
+                    {
+                        errMsg = QStringLiteral("Row %1: LED value \"%2\" is invalid (must be >=0).").arg(r).arg(text);
+                        return false;
+                    }
+                    ledColors.push_back(v);
+                }
+
+                ActionItem ledAction;
+                ledAction.flowName = flowName;
+                ledAction.type = ActionType::L;
+                ledAction.ledMode = mode;
+                ledAction.ledColors = ledColors;
+                ledAction.rawParamText = QStringLiteral("mode=%1 colors=%2").arg(mode, joinIntList(ledColors));
+                m_actions.push_back(ledAction);
+                row.timeColumns.push_back(blockTimeCols.value(bi, -1));
+                break;
             }
-        }
-
-        ActionItem ledAction;
-        ledAction.flowName = flowName;
-        ledAction.type = ActionType::L;
-        ledAction.ledMode = mode;
-        ledAction.ledColors = ledColors;
-        ledAction.rawParamText = QStringLiteral("mode=%1 colors=%2").arg(mode, joinIntList(ledColors));
-        ledAction.voiceSet = voiceSet;
-        // optional actions
-        bool hasBeepAction = false;
-        ActionItem beepAction;
-        bool hasVoiceAction = false;
-        ActionItem voiceAction;
-        bool hasDelayAction = false;
-        ActionItem delayAction;
-
-        if (beepCol >= 0)
-        {
-            const QString beepText = readString(r, beepCol);
-            if (!beepText.isEmpty())
+            case BlockType::Beep:
             {
+                ActionItem beepAction;
+                beepAction.flowName = flowName;
+                beepAction.type = ActionType::B;
+                beepAction.rawParamText = QStringLiteral("BEEP");
+                m_actions.push_back(beepAction);
+                row.timeColumns.push_back(blockTimeCols.value(bi, -1));
+                break;
+            }
+            case BlockType::Voice:
+            {
+                const QString voiceText = cellAt(block.voiceCol);
+                if (voiceText.isEmpty())
+                {
+                    errMsg = QStringLiteral("Row %1: VOICE text is empty.").arg(r);
+                    return false;
+                }
+
+                const QString styleText = cellAt(block.voiceStyleCol);
+                if (styleText.isEmpty())
+                {
+                    errMsg = QStringLiteral("Row %1: style is empty.").arg(r);
+                    return false;
+                }
                 bool ok=false;
-                const int beepVal = beepText.toInt(&ok);
-                if (!ok || beepVal < 0)
+                const int style = styleText.toInt(&ok);
+                if (!ok || (style != 1 && style != 2))
                 {
-                    errMsg = QStringLiteral("Row %1: BEEP value \"%2\" is invalid (must be >=0).")
-                                 .arg(r)
-                                 .arg(beepText);
+                    errMsg = QStringLiteral("Row %1: style value \"%2\" is invalid (must be 1 or 2).").arg(r).arg(styleText);
                     return false;
                 }
-                if (beepVal > 0)
-                {
-                    hasBeepAction = true;
-                    beepAction.flowName = flowName;
-                    beepAction.type = ActionType::B;
-                    beepAction.beepFreqHz = 0;   // Device property driven; importer only keeps duration flag/value.
-                    // 1 表示采用设备默认时长；其他>1 表示具体毫秒
-                    beepAction.beepDurMs  = (beepVal == 1 ? 0 : beepVal);
-                    beepAction.rawParamText = beepText;
-                    beepAction.voiceSet = voiceSet;
-                }
-            }
-        }
 
-        if (voiceCol >= 0)
-        {
-            const QString voiceText = readString(r, voiceCol);
-            if (!voiceText.isEmpty())
-            {
-                hasVoiceAction = true;
+                ActionItem voiceAction;
                 voiceAction.flowName = flowName;
                 voiceAction.type = ActionType::V;
                 voiceAction.voiceText = voiceText;
-                voiceAction.voiceMs = 0;
                 voiceAction.rawParamText = voiceText;
-                voiceAction.voiceSet = voiceSet;
+                voiceAction.voiceSet = style;
+                m_actions.push_back(voiceAction);
+                row.timeColumns.push_back(blockTimeCols.value(bi, -1));
+                break;
             }
-        }
-
-        if (delayCol >= 0)
-        {
-            const QString delayText = readString(r, delayCol);
-            if (!delayText.isEmpty())
+            case BlockType::Delay:
             {
+                const QString delayText = cellAt(block.delayCol);
+                if (delayText.isEmpty())
+                    break;
+
                 bool ok=false;
                 const int delay = delayText.toInt(&ok);
                 if (!ok || delay < 0)
                 {
-                    errMsg = QStringLiteral("Row %1: DELAY value \"%2\" is invalid (must be >=0).")
-                                 .arg(r)
-                                 .arg(delayText);
+                    errMsg = QStringLiteral("Row %1: DELAY value \"%2\" is invalid (must be >=0).").arg(r).arg(delayText);
                     return false;
                 }
 
-                hasDelayAction = true;
+                ActionItem delayAction;
                 delayAction.flowName = flowName;
                 delayAction.type = ActionType::D;
                 delayAction.delayMs = delay;
                 delayAction.rawParamText = delayText;
-                delayAction.voiceSet = voiceSet;
+                m_actions.push_back(delayAction);
+                row.timeColumns.push_back(blockTimeCols.value(bi, -1));
+                break;
+            }
             }
         }
 
-        // emit in header order
-        bool ledPushed = false;
-        for (const auto& hc : m_headerCols)
+        int lastNonEmpty = -1;
+        for (int i = row.cells.size() - 1; i >= 0; --i)
         {
-            switch (hc.field)
+            if (!row.cells[i].trimmed().isEmpty())
             {
-            case HeaderField::Mode:
-                // 工作模式仅用于 LED 动作，实际动作在 LED 行里体现
-                break;
-            case HeaderField::LED:
-                if (!ledPushed)
-                {
-                    m_actions.push_back(ledAction);
-                    ledPushed = true;
-                }
-                break;
-            case HeaderField::Beep:
-                if (hasBeepAction)
-                    m_actions.push_back(beepAction);
-                break;
-            case HeaderField::Voice:
-                if (hasVoiceAction)
-                    m_actions.push_back(voiceAction);
-                break;
-            case HeaderField::Delay:
-                if (hasDelayAction)
-                    m_actions.push_back(delayAction);
-                break;
-            case HeaderField::VoiceSet:
-                // style column is a row attribute, not an action
+                lastNonEmpty = i;
                 break;
             }
         }
+        if (lastNonEmpty >= 0)
+            maxDisplayCols = std::max(maxDisplayCols, lastNonEmpty + 1);
+        m_tableRows.push_back(row);
     }
 
+    if (maxDisplayCols < 0)
+        maxDisplayCols = 0;
+    m_tableColumnCount = maxDisplayCols;
+    for (auto& row : m_tableRows)
+    {
+        if (row.cells.size() > m_tableColumnCount)
+            row.cells.resize(m_tableColumnCount);
+    }
+
+    if (!hasHeader)
+    {
+        errMsg = QStringLiteral("Excel has no header rows.");
+        return false;
+    }
     if (dataRowIndex <= 0)
     {
         errMsg = QStringLiteral("Excel has no data rows under the header.");

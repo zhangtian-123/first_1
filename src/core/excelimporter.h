@@ -5,34 +5,30 @@
  *
  * Excel rules (summarised):
  * - Only .xlsx is accepted; only the first sheet is read.
- * - Header must contain "工作模式" and LED columns named LED1..LEDn (n <= 10).
- * - Optional columns: BEEP, VOICE, DELAY, 风格 (1/2). Actions are emitted following the header order.
- * - Data rows are parsed as a contiguous block starting from row 2; stop at the first empty row.
- * - Each data row becomes a Segment: one LED action plus optional Beep/Voice/Delay actions sharing the same flowName.
+ * - A header row can appear multiple times. Any row containing header tokens
+ *   (LED/BEEP/VOICE/风格/DELAY/工作模式/LEDn) is treated as a header row.
+ * - Data rows belong to the most recent header row; parsing stops at the first empty row.
+ * - Header order defines the WORK action order for that block.
+ * - LED block header is: LED | 工作模式 | LED1..LEDn (n is dynamic per block).
+ * - BEEP is 1 column; VOICE is 2 columns (VOICE + 风格); DELAY is 1 column.
  * - LED cells allow 0/empty to mean "random"; work mode accepts ALL/SEQ/RAND (Chinese aliases allowed).
  */
-
-enum class HeaderField
-{
-    Mode,
-    LED,
-    Beep,
-    Voice,
-    Delay,
-    VoiceSet
-};
-
-struct HeaderCol
-{
-    HeaderField field;
-    int ledIndex = 0; // for LED columns (1-based); 0 otherwise
-};
 
 #include <QObject>
 #include <QString>
 #include <QVector>
 
 #include "models.h"
+
+struct ExcelTableRow
+{
+    bool isHeader = false;
+    int excelRow = 0;                 ///< 1-based Excel row index
+    QString flowName;                 ///< for data rows
+    QVector<QString> cells;           ///< trimmed cell text per column
+    QVector<int> ledColumns;          ///< 0-based indices into cells for LED1..LEDn
+    QVector<int> timeColumns;         ///< 0-based indices into cells for step times
+};
 
 class ExcelImporter : public QObject
 {
@@ -59,9 +55,19 @@ public:
     const QVector<ActionItem>& actions() const { return m_actions; }
 
     /**
-     * @brief Parsed header columns in the original order (excluding unknown columns).
+     * @brief Parsed rows for table display (including header rows).
      */
-    const QVector<HeaderCol>& headerColumns() const { return m_headerCols; }
+    const QVector<ExcelTableRow>& tableRows() const { return m_tableRows; }
+
+    /**
+     * @brief Excel column start (1-based) for table display.
+     */
+    int tableColumnStart() const { return m_tableColumnStart; }
+
+    /**
+     * @brief Excel column count for table display.
+     */
+    int tableColumnCount() const { return m_tableColumnCount; }
 
     /**
      * @brief Whether the imported sheet contains a given action type.
@@ -79,7 +85,7 @@ public:
     QString sourcePath() const { return m_sourcePath; }
 
     /**
-     * @brief Number of LED columns detected from the sheet header.
+     * @brief Max LED columns detected across all header blocks.
      */
     int ledCount() const { return m_ledColumnCount; }
 
@@ -87,5 +93,7 @@ private:
     QString m_sourcePath;
     QVector<ActionItem> m_actions;
     int m_ledColumnCount = 0;
-    QVector<HeaderCol> m_headerCols;
+    int m_tableColumnStart = 1;
+    int m_tableColumnCount = 0;
+    QVector<ExcelTableRow> m_tableRows;
 };

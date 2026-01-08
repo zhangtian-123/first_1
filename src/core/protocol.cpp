@@ -152,7 +152,8 @@ static QVector<int> buildOrders(const QString& mode, int ledCount)
 {
     QVector<int> orders;
     orders.resize(ledCount);
-    if (mode == QStringLiteral("RAND"))
+    const QString u = mode.trimmed().toUpper();
+    if (u == QStringLiteral("RAND"))
     {
         QVector<int> indices;
         indices.reserve(ledCount);
@@ -160,6 +161,11 @@ static QVector<int> buildOrders(const QString& mode, int ledCount)
             indices.push_back(i);
         std::shuffle(indices.begin(), indices.end(), *QRandomGenerator::global());
         orders = indices;
+    }
+    else if (u == QStringLiteral("SEQ"))
+    {
+        for (int i = 0; i < ledCount; ++i)
+            orders[i] = i + 1;
     }
     else
     {
