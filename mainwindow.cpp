@@ -25,6 +25,16 @@
 #include <QHash>
 #include <QItemSelectionModel>
 #include <QStatusBar>
+#include <QMouseEvent>
+#include <QApplication>
+#include <QAbstractButton>
+#include <QAbstractItemView>
+#include <QAbstractSpinBox>
+#include <QTabBar>
+#include <QScrollBar>
+#include <QSlider>
+#include <QSignalBlocker>
+#include <QSet>
 
 #include "src/config/appsettings.h"
 #include "src/services/serialservice.h"
@@ -49,6 +59,7 @@ MainWindow::MainWindow(QWidget *parent)
     loadSettings();
     buildUi();
     wireSignals();
+    qApp->installEventFilter(this);
 
     // Models / delegates
     m_queueModel = new QueueTableModel(this);
@@ -110,10 +121,12 @@ MainWindow::MainWindow(QWidget *parent)
     m_serial->refreshPorts();
     m_uiState = UiRunState::NoConfig;
     applyUiState();
+    m_hotkeyAutoSaveEnabled = true;
 }
 
 MainWindow::~MainWindow()
 {
+    qApp->removeEventFilter(this);
     saveSettings();
     delete m_settings;
 }
@@ -128,6 +141,60 @@ void MainWindow::buildUi()
 
     setWindowTitle(tr("VisualWorkflowHost"));
     resize(1180, 760);
+}
+
+bool MainWindow::eventFilter(QObject* obj, QEvent* event)
+{
+    if (event->type() == QEvent::MouseButtonPress)
+    {
+        auto* mouseEvent = static_cast<QMouseEvent*>(event);
+        if (mouseEvent->button() == Qt::LeftButton)
+        {
+            QWidget* hit = QApplication::widgetAt(mouseEvent->globalPos());
+            if (!hit)
+                return QMainWindow::eventFilter(obj, event);
+
+            if (hit->window() != this)
+                return QMainWindow::eventFilter(obj, event);
+
+            auto isInteractive = [](QWidget* widget) {
+                QWidget* cur = widget;
+                while (cur)
+                {
+                    if (qobject_cast<QLineEdit*>(cur)
+                        || qobject_cast<QComboBox*>(cur)
+                        || qobject_cast<QKeySequenceEdit*>(cur)
+                        || qobject_cast<QAbstractButton*>(cur)
+                        || qobject_cast<QAbstractItemView*>(cur)
+                        || qobject_cast<QAbstractSpinBox*>(cur)
+                        || qobject_cast<QTabBar*>(cur)
+                        || qobject_cast<QHeaderView*>(cur)
+                        || qobject_cast<QScrollBar*>(cur)
+                        || qobject_cast<QSlider*>(cur))
+                    {
+                        return true;
+                    }
+                    cur = cur->parentWidget();
+                }
+                return false;
+            };
+
+            if (!isInteractive(hit))
+            {
+                if (m_tblQueue && m_tblQueue->selectionModel())
+                    m_tblQueue->clearSelection();
+                if (m_tblColors && m_tblColors->selectionModel())
+                    m_tblColors->clearSelection();
+                if (m_tblConflicts && m_tblConflicts->selectionModel())
+                    m_tblConflicts->clearSelection();
+
+                QWidget* focusWidget = QApplication::focusWidget();
+                if (focusWidget && focusWidget->window() == this)
+                    focusWidget->clearFocus();
+            }
+        }
+    }
+    return QMainWindow::eventFilter(obj, event);
 }
 
 QWidget* MainWindow::buildStatusPage()
@@ -221,7 +288,6 @@ QWidget* MainWindow::buildSettingsPage()
     m_spBrightness = new QSpinBox(gbDev);m_spBrightness->setRange(0, 255);
     m_spBuzzerFreq = new QSpinBox(gbDev);m_spBuzzerFreq->setRange(1000, 4000);
     m_spBuzzerDur = new QSpinBox(gbDev); m_spBuzzerDur->setRange(0, 600000);
-    m_btnSaveDevice = new QPushButton(tr("保存"), gbDev);
 
     int rd=0;
     gDev->addWidget(new QLabel(tr("点亮时长"), gbDev), rd,0); gDev->addWidget(m_spOnMs, rd,1); rd++;
@@ -230,7 +296,6 @@ QWidget* MainWindow::buildSettingsPage()
     gDev->addWidget(new QLabel(tr("亮度"), gbDev), rd,0); gDev->addWidget(m_spBrightness, rd,1); rd++;
     gDev->addWidget(new QLabel(tr("蜂鸣器频率"), gbDev), rd,0); gDev->addWidget(m_spBuzzerFreq, rd,1); rd++;
     gDev->addWidget(new QLabel(tr("蜂鸣器时长"), gbDev), rd,0); gDev->addWidget(m_spBuzzerDur, rd,1); rd++;
-    gDev->addWidget(m_btnSaveDevice, rd,1);
 
     // Voice box (two sets)
     auto* gbVoice = new QGroupBox(tr("语音设置"), page);
@@ -281,8 +346,6 @@ QWidget* MainWindow::buildSettingsPage()
     hVoice->addWidget(gbVoice2);
     vVoice->addLayout(hVoice);
 
-    m_btnSaveVoice = new QPushButton(tr("保存"), gbVoice);
-    vVoice->addWidget(m_btnSaveVoice, 0, Qt::AlignRight);
 
     // Colors
     auto* gbColors = new QGroupBox(tr("颜色表"), page);
@@ -296,12 +359,10 @@ QWidget* MainWindow::buildSettingsPage()
     m_tblColors->horizontalHeader()->setStretchLastSection(true);
     m_btnAddColor = new QPushButton(tr("新增"), gbColors);
     m_btnDeleteColor = new QPushButton(tr("删除所选"), gbColors);
-    m_btnSaveColors = new QPushButton(tr("保存"), gbColors);
     m_btnClearColors = new QPushButton(tr("清空"), gbColors);
     auto* colorBtns = new QHBoxLayout();
     colorBtns->addWidget(m_btnAddColor);
     colorBtns->addWidget(m_btnDeleteColor);
-    colorBtns->addWidget(m_btnSaveColors);
     colorBtns->addWidget(m_btnClearColors);
     colorBtns->addStretch(1);
     vColors->addLayout(colorBtns);
@@ -316,15 +377,18 @@ QWidget* MainWindow::buildSettingsPage()
     m_tblConflicts->setSelectionMode(QAbstractItemView::SingleSelection);
     m_tblConflicts->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     m_btnAddConflict = new QPushButton(tr("新增行"), gbConf);
-    m_btnSaveConflicts = new QPushButton(tr("保存"), gbConf);
     m_btnClearConflicts = new QPushButton(tr("清空"), gbConf);
     auto* confBtns = new QHBoxLayout();
     confBtns->addWidget(m_btnAddConflict);
-    confBtns->addWidget(m_btnSaveConflicts);
     confBtns->addWidget(m_btnClearConflicts);
     confBtns->addStretch(1);
     vConf->addLayout(confBtns);
     vConf->addWidget(m_tblConflicts, 1);
+    m_btnApplySettings = new QPushButton(tr("应用"), gbConf);
+    auto* applyRow = new QHBoxLayout();
+    applyRow->addStretch(1);
+    applyRow->addWidget(m_btnApplySettings);
+    vConf->addLayout(applyRow);
 
     // Hotkeys
     auto* gbHot = new QGroupBox(tr("快捷键"), page);
@@ -350,8 +414,7 @@ QWidget* MainWindow::buildSettingsPage()
     m_keyAllOff = new QKeySequenceEdit(gbHot);
     gHot->addWidget(new QLabel(tr("测试全灭"), gbHot), rh, 0);
     gHot->addWidget(m_keyAllOff, rh, 1); rh++;
-    m_btnSaveHotkeys = new QPushButton(tr("保存快捷键"), gbHot);
-    gHot->addWidget(m_btnSaveHotkeys, rh, 1);
+    gHot->addWidget(new QWidget(gbHot), rh, 1);
 
     // Tests
     auto* gbTest = new QGroupBox(tr("测试功能"), page);
@@ -419,28 +482,26 @@ void MainWindow::wireSignals()
     // serial
     connect(m_btnRefreshPorts, &QPushButton::clicked, this, &MainWindow::onRefreshPorts);
     connect(m_btnOpenClose, &QPushButton::clicked, this, &MainWindow::onOpenCloseSerial);
+    connect(m_cmbPort, &QComboBox::currentTextChanged, this, &MainWindow::onPortSelectionChanged);
     connect(m_serial, &SerialService::portsUpdated, this, &MainWindow::onPortsUpdated);
     connect(m_serial, &SerialService::opened, this, &MainWindow::onSerialOpened);
     connect(m_serial, &SerialService::closed, this, &MainWindow::onSerialClosed);
     connect(m_serial, &SerialService::error, this, &MainWindow::onSerialError);
 
     // device
-    connect(m_btnSaveDevice, &QPushButton::clicked, this, &MainWindow::onSaveDevice);
-    connect(m_btnSaveVoice, &QPushButton::clicked, this, &MainWindow::onSaveVoice);
+    // removed per-Block save buttons; use Apply
 
     // colors
     connect(m_btnAddColor, &QPushButton::clicked, this, &MainWindow::onAddColor);
     connect(m_btnDeleteColor, &QPushButton::clicked, this, &MainWindow::onDeleteColor);
-    connect(m_btnSaveColors, &QPushButton::clicked, this, &MainWindow::onSaveColors);
     connect(m_btnClearColors, &QPushButton::clicked, this, &MainWindow::onClearColors);
 
     // conflicts
     connect(m_btnAddConflict, &QPushButton::clicked, this, &MainWindow::onAddConflict);
-    connect(m_btnSaveConflicts, &QPushButton::clicked, this, &MainWindow::onSaveConflicts);
     connect(m_btnClearConflicts, &QPushButton::clicked, this, &MainWindow::onClearConflicts);
 
     // hotkeys
-    connect(m_btnSaveHotkeys, &QPushButton::clicked, this, &MainWindow::onSaveHotkeys);
+    connect(m_btnApplySettings, &QPushButton::clicked, this, &MainWindow::onApplySettings);
     auto bindHotkeyEdit = [&](QKeySequenceEdit* edit){
         if (!edit) return;
         connect(edit, &QKeySequenceEdit::keySequenceChanged, this, &MainWindow::updateHotkeyDuplicateHints);
@@ -637,6 +698,7 @@ void MainWindow::onRefreshPorts()
 
 void MainWindow::onPortsUpdated(const QStringList &ports)
 {
+    const QSignalBlocker blocker(m_cmbPort);
     m_cmbPort->clear();
     m_cmbPort->addItems(ports);
     if (m_settings && !m_settings->serial.portName.isEmpty())
@@ -647,6 +709,13 @@ void MainWindow::onPortsUpdated(const QStringList &ports)
     }
     if (m_cmbPort->currentIndex() < 0 && m_cmbPort->count() > 0)
         m_cmbPort->setCurrentIndex(0);
+}
+
+void MainWindow::onPortSelectionChanged(const QString& port)
+{
+    Q_UNUSED(port);
+    if (m_serial && m_serial->isOpen())
+        m_serial->closePort();
 }
 
 void MainWindow::onOpenCloseSerial()
@@ -752,47 +821,46 @@ void MainWindow::onSaveVoice()
     }
 }
 
+void MainWindow::onApplySettings()
+{
+    if (!m_settings) return;
+
+    // serial
+    m_settings->serial.portName = m_cmbPort->currentText();
+    m_settings->serial.baud = m_cmbBaud->currentText().toInt();
+    m_settings->serial.dataBits = m_cmbDataBits->currentText().toInt();
+    m_settings->serial.parity = m_cmbParity->currentText();
+    m_settings->serial.stopBits = m_cmbStopBits->currentText().toInt();
+
+    updateDeviceVoiceColorsFromUi();
+
+    // hotkeys
+    HotkeyConfig hk = readHotkeysFromUi();
+    m_settings->hotkeys = hk;
+    m_keyNext->setKeySequence(hk.keyNext);
+    m_keyRerun->setKeySequence(hk.keyRerun);
+    for (int i = 0; i < m_keyQuickColor.size() && i < hk.keyQuickColor.size(); ++i)
+        m_keyQuickColor[i]->setKeySequence(hk.keyQuickColor[i]);
+    m_keyAllOff->setKeySequence(hk.keyAllOff);
+    updateHotkeyDuplicateHints();
+    rebuildShortcuts();
+
+    // colors / conflicts
+    m_settings->conflicts = m_conflictModel->triples();
+
+    AppSettings::saveHotkeys(m_settings->hotkeys);
+    AppSettings::save(*m_settings);
+
+    sendConfigsToDevice(false);
+}
+
 // ================= Hotkeys & Tests =================
 void MainWindow::onSaveHotkeys()
 {
     if (!m_settings) return;
-    auto trimSeq = [](const QKeySequence& seq)->QKeySequence {
-        if (seq.count() > 1) return QKeySequence(seq[0]);
-        return seq;
-    };
-    auto seqKey = [](const QKeySequence& seq)->QString {
-        return seq.toString(QKeySequence::PortableText);
-    };
     HotkeyConfig hk;
-    hk.keyNext = trimSeq(m_keyNext->keySequence());
-    hk.keyRerun = trimSeq(m_keyRerun->keySequence());
-    hk.keyAllOff = trimSeq(m_keyAllOff->keySequence());
-    hk.keyQuickColor.clear();
-    for (int i = 0; i < m_keyQuickColor.size(); ++i)
-        hk.keyQuickColor.push_back(trimSeq(m_keyQuickColor[i]->keySequence()));
-
-    // disallow duplicate non-empty shortcuts
-    QHash<QString, QString> used;
-    auto addCheck = [&](const QString& name, const QKeySequence& seq)->bool {
-        if (seq.isEmpty())
-            return true;
-        const QString key = seqKey(seq);
-        if (used.contains(key))
-        {
-            QMessageBox::warning(this, tr("快捷键冲突"),
-                                 tr("快捷键重复：%1 与 %2").arg(used.value(key), name));
-            return false;
-        }
-        used.insert(key, name);
-        return true;
-    };
-    if (!addCheck(tr("顺序执行"), hk.keyNext)) return;
-    if (!addCheck(tr("标记需重做"), hk.keyRerun)) return;
-    for (int i = 0; i < hk.keyQuickColor.size(); ++i)
-    {
-        if (!addCheck(tr("测试颜色%1常亮").arg(i + 1), hk.keyQuickColor[i])) return;
-    }
-    if (!addCheck(tr("测试全灭"), hk.keyAllOff)) return;
+    if (!collectHotkeys(hk, true))
+        return;
 
     m_settings->hotkeys = hk;
     AppSettings::saveHotkeys(hk);
@@ -807,8 +875,86 @@ void MainWindow::onSaveHotkeys()
     QMessageBox::information(this, tr("提示"), tr("快捷键已保存"));
 }
 
+HotkeyConfig MainWindow::readHotkeysFromUi() const
+{
+    HotkeyConfig hk;
+    hk.keyNext = readKeySequenceFromEdit(m_keyNext);
+    hk.keyRerun = readKeySequenceFromEdit(m_keyRerun);
+    hk.keyAllOff = readKeySequenceFromEdit(m_keyAllOff);
+    hk.keyQuickColor.clear();
+    for (int i = 0; i < m_keyQuickColor.size(); ++i)
+        hk.keyQuickColor.push_back(readKeySequenceFromEdit(m_keyQuickColor[i]));
+    return hk;
+}
+
+QKeySequence MainWindow::readKeySequenceFromEdit(const QKeySequenceEdit* edit) const
+{
+    if (!edit)
+        return QKeySequence();
+
+    QKeySequence seq = edit->keySequence();
+    QLineEdit* line = edit->findChild<QLineEdit*>();
+    if (line)
+    {
+        const QString text = line->text().trimmed();
+        if (!text.isEmpty())
+        {
+            QKeySequence parsed = QKeySequence::fromString(text, QKeySequence::NativeText);
+            if (parsed.isEmpty())
+                parsed = QKeySequence::fromString(text, QKeySequence::PortableText);
+            if (!parsed.isEmpty())
+            {
+                const QString seqText = seq.toString(QKeySequence::NativeText);
+                if (seq.isEmpty() || seqText != text)
+                    seq = parsed;
+            }
+        }
+    }
+
+    if (seq.count() > 1)
+        seq = QKeySequence(seq[0]);
+    return seq;
+}
+
+bool MainWindow::collectHotkeys(HotkeyConfig& hk, bool showWarning)
+{
+    auto seqKey = [](const QKeySequence& seq)->QString {
+        return seq.toString(QKeySequence::PortableText);
+    };
+
+    hk = readHotkeysFromUi();
+
+    QHash<QString, QString> used;
+    auto addCheck = [&](const QString& name, const QKeySequence& seq)->bool {
+        if (seq.isEmpty())
+            return true;
+        const QString key = seqKey(seq);
+        if (used.contains(key))
+        {
+            if (showWarning)
+            {
+                QMessageBox::warning(this, tr("快捷键冲突"),
+                                     tr("快捷键重复：%1 与 %2").arg(used.value(key), name));
+            }
+            return false;
+        }
+        used.insert(key, name);
+        return true;
+    };
+    if (!addCheck(tr("顺序执行"), hk.keyNext)) return false;
+    if (!addCheck(tr("标记需重做"), hk.keyRerun)) return false;
+    for (int i = 0; i < hk.keyQuickColor.size(); ++i)
+    {
+        if (!addCheck(tr("测试颜色%1常亮").arg(i + 1), hk.keyQuickColor[i])) return false;
+    }
+    if (!addCheck(tr("测试全灭"), hk.keyAllOff)) return false;
+    return true;
+}
+
 void MainWindow::updateHotkeyDuplicateHints()
 {
+    if (m_hotkeyUpdateGuard)
+        return;
     struct Item
     {
         QKeySequenceEdit* edit;
@@ -830,7 +976,7 @@ void MainWindow::updateHotkeyDuplicateHints()
     {
         const auto* edit = items[i].edit;
         if (!edit) continue;
-        const QKeySequence seq = edit->keySequence();
+        const QKeySequence seq = readKeySequenceFromEdit(edit);
         if (seq.isEmpty()) continue;
         const QString key = seqKey(seq);
         groups[key].push_back(i);
@@ -883,6 +1029,64 @@ void MainWindow::updateHotkeyDuplicateHints()
         statusBar()->showMessage(tr("快捷键重复：%1").arg(conflicts.join(QStringLiteral(" | "))), 5000);
     else
         statusBar()->clearMessage();
+
+    if (conflicts.isEmpty() && m_settings && m_hotkeyAutoSaveEnabled)
+    {
+        HotkeyConfig hk;
+        if (collectHotkeys(hk, false))
+        {
+            m_hotkeyUpdateGuard = true;
+            m_settings->hotkeys = hk;
+            AppSettings::saveHotkeys(hk);
+            m_keyNext->setKeySequence(hk.keyNext);
+            m_keyRerun->setKeySequence(hk.keyRerun);
+            for (int i = 0; i < m_keyQuickColor.size() && i < hk.keyQuickColor.size(); ++i)
+                m_keyQuickColor[i]->setKeySequence(hk.keyQuickColor[i]);
+            m_keyAllOff->setKeySequence(hk.keyAllOff);
+            rebuildShortcuts();
+            m_hotkeyUpdateGuard = false;
+        }
+    }
+}
+
+void MainWindow::updateDeviceVoiceColorsFromUi()
+{
+    if (!m_settings) return;
+
+    m_settings->device.onMs = m_spOnMs->value();
+    m_settings->device.gapMs = m_spGapMs->value();
+    m_settings->device.ledCount = m_spLedCount->value();
+    m_settings->device.brightness = m_spBrightness->value();
+    m_settings->device.buzzerFreq = m_spBuzzerFreq->value();
+    m_settings->device.buzzerDurMs = m_spBuzzerDur->value();
+
+    m_settings->voice1.announcer = m_cmbVoice1Announcer->currentData().toInt();
+    m_settings->voice1.voiceStyle = m_spVoice1Style->value();
+    m_settings->voice1.voiceSpeed = m_spVoice1Speed->value();
+    m_settings->voice1.voicePitch = m_spVoice1Pitch->value();
+    m_settings->voice1.voiceVolume = m_spVoice1Volume->value();
+
+    m_settings->voice2.announcer = m_cmbVoice2Announcer->currentData().toInt();
+    m_settings->voice2.voiceStyle = m_spVoice2Style->value();
+    m_settings->voice2.voiceSpeed = m_spVoice2Speed->value();
+    m_settings->voice2.voicePitch = m_spVoice2Pitch->value();
+    m_settings->voice2.voiceVolume = m_spVoice2Volume->value();
+
+    m_settings->colors = m_colorModel->colors();
+}
+
+void MainWindow::sendConfigsToDevice(bool warnIfSerialClosed)
+{
+    if (!m_serial || !m_serial->isOpen() || !m_engine)
+    {
+        if (warnIfSerialClosed)
+            QMessageBox::warning(this, tr("提示"), tr("串口未打开，已保存设置但未下发到设备"));
+        return;
+    }
+    m_engine->setDeviceProps(m_settings->device);
+    m_engine->setColors(m_settings->colors);
+    m_engine->setVoiceSets(m_settings->voice1, m_settings->voice2);
+    m_engine->sendConfigs();
 }
 
 void MainWindow::rebuildShortcuts()
@@ -895,9 +1099,14 @@ void MainWindow::rebuildShortcuts()
     if (!m_settings)
         return;
 
+    QSet<QString> used;
     auto addShortcut = [&](const QKeySequence& seq, const char* slot, bool isTestShortcut = false){
         if (seq.isEmpty())
             return;
+        const QString key = seq.toString(QKeySequence::PortableText);
+        if (used.contains(key))
+            return;
+        used.insert(key);
         auto* sc = new QShortcut(seq, this);
         sc->setContext(Qt::WindowShortcut);
         connect(sc, SIGNAL(activated()), this, slot);
@@ -985,6 +1194,8 @@ void MainWindow::onTestLed()
         QMessageBox::warning(this, tr("提示"), tr("请先打开串口"));
         return;
     }
+    updateDeviceVoiceColorsFromUi();
+    sendConfigsToDevice(false);
     bool ok = false;
     const int idx = m_editLedTest->text().trimmed().toInt(&ok);
     if (!ok)
@@ -1002,6 +1213,8 @@ void MainWindow::onTestBeep()
         QMessageBox::warning(this, tr("提示"), tr("请先打开串口"));
         return;
     }
+    updateDeviceVoiceColorsFromUi();
+    sendConfigsToDevice(false);
     const DeviceProps dev = m_settings ? m_settings->device : DeviceProps();
     const QString frame = Protocol::packBeepTest(dev);
     if (m_engine) m_engine->logTestTx(frame);
@@ -1015,6 +1228,8 @@ void MainWindow::onTestVoice()
         QMessageBox::warning(this, tr("提示"), tr("请先打开串口"));
         return;
     }
+    updateDeviceVoiceColorsFromUi();
+    sendConfigsToDevice(false);
     const QString text = m_editVoiceTest->text();
     const int style = m_cmbVoiceTestStyle ? m_cmbVoiceTestStyle->currentData().toInt() : 0;
     const QString frame = Protocol::packVoiceTest(text, style);
@@ -1080,12 +1295,10 @@ void MainWindow::onClearColors()
     if (!m_settings) return;
     m_colorModel->clearAll();
     m_settings->colors = m_colorModel->colors();
-    AppSettings::saveColors(m_settings->colors);
 
     m_conflictModel->setMaxColorIndex(0);
     m_conflictModel->clearAll();
     m_settings->conflicts.clear();
-    AppSettings::saveConflicts(m_settings->conflicts);
 }
 
 // ================= Conflicts =================
@@ -1108,7 +1321,6 @@ void MainWindow::onClearConflicts()
     if (!m_settings) return;
     m_conflictModel->clearAll();
     m_settings->conflicts.clear();
-    AppSettings::saveConflicts(m_settings->conflicts);
 }
 
 // ================= Engine callbacks =================

@@ -49,10 +49,12 @@ private slots:
     void onRefreshPorts();
     void onOpenCloseSerial();
     void onPortsUpdated(const QStringList& ports);
+    void onPortSelectionChanged(const QString& port);
 
     // Settings: device
     void onSaveDevice();
     void onSaveVoice();
+    void onApplySettings();
 
     // Settings: colors
     void onAddColor();
@@ -109,8 +111,14 @@ private:
     void rebuildShortcuts();
     void enableTestHotkeys(bool enable);
     void updateHotkeyDuplicateHints();
+    bool collectHotkeys(HotkeyConfig& hk, bool showWarning);
+    void updateDeviceVoiceColorsFromUi();
+    void sendConfigsToDevice(bool warnIfSerialClosed);
+    bool eventFilter(QObject* obj, QEvent* event) override;
     void sendTestSolidColor(int idx);
     void sendTestAllOff();
+    HotkeyConfig readHotkeysFromUi() const;
+    QKeySequence readKeySequenceFromEdit(const QKeySequenceEdit* edit) const;
 
 private:
     enum class UiRunState { NoConfig, Ready, Started, Running };
@@ -153,7 +161,6 @@ private:
     QSpinBox* m_spBrightness = nullptr;
     QSpinBox* m_spBuzzerFreq = nullptr;
     QSpinBox* m_spBuzzerDur = nullptr;
-    QPushButton* m_btnSaveDevice = nullptr;
 
     // Voice sets
     QComboBox* m_cmbVoice1Announcer = nullptr;
@@ -166,29 +173,29 @@ private:
     QSpinBox* m_spVoice2Speed = nullptr;
     QSpinBox* m_spVoice2Pitch = nullptr;
     QSpinBox* m_spVoice2Volume = nullptr;
-    QPushButton* m_btnSaveVoice = nullptr;
 
     // Colors
     QTableView* m_tblColors = nullptr;
     QPushButton* m_btnAddColor = nullptr;
     QPushButton* m_btnDeleteColor = nullptr;
-    QPushButton* m_btnSaveColors = nullptr;
     QPushButton* m_btnClearColors = nullptr;
 
     // Conflicts
     QTableView* m_tblConflicts = nullptr;
     QPushButton* m_btnAddConflict = nullptr;
-    QPushButton* m_btnSaveConflicts = nullptr;
     QPushButton* m_btnClearConflicts = nullptr;
+
+    QPushButton* m_btnApplySettings = nullptr;
 
     // Hotkeys
     QKeySequenceEdit* m_keyNext = nullptr;
     QKeySequenceEdit* m_keyRerun = nullptr;
     QVector<QKeySequenceEdit*> m_keyQuickColor;
     QKeySequenceEdit* m_keyAllOff = nullptr;
-    QPushButton* m_btnSaveHotkeys = nullptr;
     QVector<QShortcut*> m_shortcuts;
     QVector<QShortcut*> m_testShortcuts;
+    bool m_hotkeyUpdateGuard = false;
+    bool m_hotkeyAutoSaveEnabled = false;
 
     // Tests
     QLineEdit* m_editLedTest = nullptr;
@@ -203,4 +210,6 @@ private:
     ColorTableModel* m_colorModel = nullptr;
     ConflictTableModel* m_conflictModel = nullptr;
     ConflictColorDelegate* m_conflictDelegate = nullptr;
+
+protected:
 };

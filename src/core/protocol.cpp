@@ -139,7 +139,7 @@ QString packTestSolid(int colorIndex)
 
 QString packTestAllOff()
 {
-    return QStringLiteral("LEDTEST:0\r\n");
+    return QStringLiteral("LEDTEST:-1\r\n");
 }
 
 QString packVoiceTest(const QString &text, int style)

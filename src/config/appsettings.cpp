@@ -71,9 +71,14 @@ namespace Keys
     static const char* kHotNext       = "hotkeys/next";
     static const char* kHotRerun      = "hotkeys/rerun";
     static const char* kHotAllOff     = "hotkeys/allOff";
+    static const char* kHotNextCode   = "hotkeys/nextCode";
+    static const char* kHotRerunCode  = "hotkeys/rerunCode";
+    static const char* kHotAllOffCode = "hotkeys/allOffCode";
     // quickColor 使用数组：hotkeys/quickColor/size + hotkeys/quickColor/i
     static const char* kHotQuickSize  = "hotkeys/quickColor/size";
     static const char* kHotQuickItem  = "hotkeys/quickColor/%1";
+    static const char* kHotQuickCodeSize  = "hotkeys/quickColorCode/size";
+    static const char* kHotQuickCodeItem  = "hotkeys/quickColorCode/%1";
 
     // colors 数组
     static const char* kColorsArray   = "colors/items";
@@ -98,6 +103,11 @@ static void ensureQuickColorSize(HotkeyConfig& hk)
     }
 }
 
+static int keySequenceToCode(const QKeySequence& seq)
+{
+    return seq.count() > 0 ? seq[0] : 0;
+}
+
 // ==============================
 // 全量读取
 // ==============================
@@ -105,6 +115,25 @@ SettingsData AppSettings::load()
 {
     QSettings s = makeSettings();
     SettingsData d;
+    auto seqFromString = [](const QString& text)->QKeySequence {
+        if (text.isEmpty())
+            return QKeySequence();
+        QKeySequence seq = QKeySequence::fromString(text, QKeySequence::PortableText);
+        if (seq.isEmpty())
+            seq = QKeySequence(text);
+        return seq;
+    };
+    auto seqFromCodeOrString = [&](const char* codeKey, const char* textKey)->QKeySequence {
+        const QVariant codeVar = s.value(codeKey, QVariant());
+        if (codeVar.isValid())
+        {
+            bool ok = false;
+            const int code = codeVar.toInt(&ok);
+            if (ok && code != 0)
+                return QKeySequence(code);
+        }
+        return seqFromString(s.value(textKey, "").toString());
+    };
 
     // app
     d.lastExcelPath = s.value(Keys::kLastExcelPath, "").toString();
@@ -138,17 +167,30 @@ SettingsData AppSettings::load()
     d.voice2.voiceVolume = s.value(Keys::kVoice2Volume, 5).toInt();
 
     // hotkeys
-    d.hotkeys.keyNext  = QKeySequence(s.value(Keys::kHotNext, "").toString());
-    d.hotkeys.keyRerun = QKeySequence(s.value(Keys::kHotRerun, "").toString());
-    d.hotkeys.keyAllOff= QKeySequence(s.value(Keys::kHotAllOff, "").toString());
+    d.hotkeys.keyNext  = seqFromCodeOrString(Keys::kHotNextCode, Keys::kHotNext);
+    d.hotkeys.keyRerun = seqFromCodeOrString(Keys::kHotRerunCode, Keys::kHotRerun);
+    d.hotkeys.keyAllOff= seqFromCodeOrString(Keys::kHotAllOffCode, Keys::kHotAllOff);
 
     // quick colors
-    const int qs = s.value(Keys::kHotQuickSize, 0).toInt();
+    int qs = s.value(Keys::kHotQuickCodeSize, 0).toInt();
     d.hotkeys.keyQuickColor.clear();
-    for (int i = 0; i < qs; ++i)
+    if (qs > 0)
     {
-        const QString k = QString(Keys::kHotQuickItem).arg(i);
-        d.hotkeys.keyQuickColor.push_back(QKeySequence(s.value(k, "").toString()));
+        for (int i = 0; i < qs; ++i)
+        {
+            const QString k = QString(Keys::kHotQuickCodeItem).arg(i);
+            const int code = s.value(k, 0).toInt();
+            d.hotkeys.keyQuickColor.push_back(code != 0 ? QKeySequence(code) : QKeySequence());
+        }
+    }
+    else
+    {
+        qs = s.value(Keys::kHotQuickSize, 0).toInt();
+        for (int i = 0; i < qs; ++i)
+        {
+            const QString k = QString(Keys::kHotQuickItem).arg(i);
+            d.hotkeys.keyQuickColor.push_back(seqFromString(s.value(k, "").toString()));
+        }
     }
     ensureQuickColorSize(d.hotkeys);
 
@@ -245,15 +287,21 @@ void AppSettings::save(const SettingsData &data)
     HotkeyConfig hk = data.hotkeys;
     ensureQuickColorSize(hk);
 
-    s.setValue(Keys::kHotNext, hk.keyNext.toString());
-    s.setValue(Keys::kHotRerun, hk.keyRerun.toString());
-    s.setValue(Keys::kHotAllOff, hk.keyAllOff.toString());
+    s.setValue(Keys::kHotNext, hk.keyNext.toString(QKeySequence::PortableText));
+    s.setValue(Keys::kHotRerun, hk.keyRerun.toString(QKeySequence::PortableText));
+    s.setValue(Keys::kHotAllOff, hk.keyAllOff.toString(QKeySequence::PortableText));
+    s.setValue(Keys::kHotNextCode, keySequenceToCode(hk.keyNext));
+    s.setValue(Keys::kHotRerunCode, keySequenceToCode(hk.keyRerun));
+    s.setValue(Keys::kHotAllOffCode, keySequenceToCode(hk.keyAllOff));
 
     s.setValue(Keys::kHotQuickSize, hk.keyQuickColor.size());
+    s.setValue(Keys::kHotQuickCodeSize, hk.keyQuickColor.size());
     for (int i = 0; i < hk.keyQuickColor.size(); ++i)
     {
         const QString k = QString(Keys::kHotQuickItem).arg(i);
-        s.setValue(k, hk.keyQuickColor[i].toString());
+        s.setValue(k, hk.keyQuickColor[i].toString(QKeySequence::PortableText));
+        const QString kc = QString(Keys::kHotQuickCodeItem).arg(i);
+        s.setValue(kc, keySequenceToCode(hk.keyQuickColor[i]));
     }
 
     // colors
@@ -363,15 +411,21 @@ void AppSettings::saveHotkeys(const HotkeyConfig &hotkeys)
     HotkeyConfig hk = hotkeys;
     ensureQuickColorSize(hk);
 
-    s.setValue(Keys::kHotNext, hk.keyNext.toString());
-    s.setValue(Keys::kHotRerun, hk.keyRerun.toString());
-    s.setValue(Keys::kHotAllOff, hk.keyAllOff.toString());
+    s.setValue(Keys::kHotNext, hk.keyNext.toString(QKeySequence::PortableText));
+    s.setValue(Keys::kHotRerun, hk.keyRerun.toString(QKeySequence::PortableText));
+    s.setValue(Keys::kHotAllOff, hk.keyAllOff.toString(QKeySequence::PortableText));
+    s.setValue(Keys::kHotNextCode, keySequenceToCode(hk.keyNext));
+    s.setValue(Keys::kHotRerunCode, keySequenceToCode(hk.keyRerun));
+    s.setValue(Keys::kHotAllOffCode, keySequenceToCode(hk.keyAllOff));
 
     s.setValue(Keys::kHotQuickSize, hk.keyQuickColor.size());
+    s.setValue(Keys::kHotQuickCodeSize, hk.keyQuickColor.size());
     for (int i = 0; i < hk.keyQuickColor.size(); ++i)
     {
         const QString k = QString(Keys::kHotQuickItem).arg(i);
-        s.setValue(k, hk.keyQuickColor[i].toString());
+        s.setValue(k, hk.keyQuickColor[i].toString(QKeySequence::PortableText));
+        const QString kc = QString(Keys::kHotQuickCodeItem).arg(i);
+        s.setValue(kc, keySequenceToCode(hk.keyQuickColor[i]));
     }
 
     s.sync();
