@@ -33,6 +33,7 @@ public:
     void setStepTime(const QString& flowName, int stepIndex, qint64 deviceMs);
     int stepCountForFlow(const QString& flowName) const;
     void setLedColorMap(const QHash<int, QColor>& colors);
+    bool ledColorIndexAt(const QModelIndex& index, int* colorIndex) const;
 
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
     int columnCount(const QModelIndex& parent = QModelIndex()) const override;

@@ -21,6 +21,7 @@ public:
 
     bool addColor(const QColor& c, QString& errMsg);
     bool removeRowAt(int row);
+    bool updateColorByIndex(int colorIndex, const QColor& c);
     void clearAll();
 
     int rowCount(const QModelIndex& parent = QModelIndex()) const override;
@@ -36,4 +37,3 @@ private:
 private:
     QVector<ColorItem> m_colors; // always indexed 1..N sequentially
 };
-

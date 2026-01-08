@@ -75,6 +75,18 @@ bool ColorTableModel::removeRowAt(int row)
     return true;
 }
 
+bool ColorTableModel::updateColorByIndex(int colorIndex, const QColor& c)
+{
+    if (!c.isValid() || colorIndex <= 0)
+        return false;
+    const int row = colorIndex - 1;
+    if (row < 0 || row >= m_colors.size())
+        return false;
+    m_colors[row].rgb = c;
+    emit dataChanged(index(row, 1), index(row, 1));
+    return true;
+}
+
 void ColorTableModel::clearAll()
 {
     beginResetModel();
@@ -137,4 +149,3 @@ Qt::ItemFlags ColorTableModel::flags(const QModelIndex& index) const
         return Qt::NoItemFlags;
     return Qt::ItemIsSelectable | Qt::ItemIsEnabled;
 }
-

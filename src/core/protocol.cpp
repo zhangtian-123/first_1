@@ -221,10 +221,10 @@ SetpRun parseSetpRun(const QString &line)
 {
     SetpRun r;
     const QString trimmed = line.trimmed();
-    if (!trimmed.startsWith(QStringLiteral("SETPRUN:")))
+    if (!trimmed.startsWith(QStringLiteral("STEPRUN:")))
         return r;
 
-    const QString body = trimmed.mid(QStringLiteral("SETPRUN:").length());
+    const QString body = trimmed.mid(QStringLiteral("STEPRUN:").length());
     const QStringList parts = body.split(',', Qt::KeepEmptyParts);
     if (parts.size() < 2)
         return r;

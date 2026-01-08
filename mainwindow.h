@@ -20,6 +20,9 @@ class QComboBox;
 class QSpinBox;
 class QKeySequenceEdit;
 class QShortcut;
+class QTimer;
+class QModelIndex;
+class QCloseEvent;
 
 class SerialService;
 class WorkflowEngine;
@@ -55,6 +58,8 @@ private slots:
     void onSaveDevice();
     void onSaveVoice();
     void onApplySettings();
+    void onQueueCellDoubleClicked(const QModelIndex& index);
+    void onColorTableDoubleClicked(const QModelIndex& index);
 
     // Settings: colors
     void onAddColor();
@@ -66,6 +71,9 @@ private slots:
     void onAddConflict();
     void onSaveConflicts();
     void onClearConflicts();
+    void onConflictDataChanged(const QModelIndex& topLeft,
+                               const QModelIndex& bottomRight,
+                               const QVector<int>& roles);
 
     // Hotkeys
     void onSaveHotkeys();
@@ -120,6 +128,12 @@ private:
     HotkeyConfig readHotkeysFromUi() const;
     QKeySequence readKeySequenceFromEdit(const QKeySequenceEdit* edit) const;
     void applyQueueColumnLayout();
+    void refreshQueueLedColors();
+    void closeEvent(QCloseEvent* event) override;
+    bool isRunActive() const;
+    bool blockConflictEditIfRunning();
+    void syncConflictsFromModel(bool validate);
+    void validateConflictsNow();
 
 private:
     enum class UiRunState { NoConfig, Ready, Started, Running };
@@ -149,12 +163,8 @@ private:
 
     // Serial widgets
     QComboBox* m_cmbPort = nullptr;
-    QComboBox* m_cmbBaud = nullptr;
-    QComboBox* m_cmbDataBits = nullptr;
-    QComboBox* m_cmbParity = nullptr;
-    QComboBox* m_cmbStopBits = nullptr;
-    QPushButton* m_btnRefreshPorts = nullptr;
     QPushButton* m_btnOpenClose = nullptr;
+    QTimer* m_portRefreshTimer = nullptr;
 
     // Device widgets
     QSpinBox* m_spOnMs = nullptr;
@@ -187,7 +197,6 @@ private:
     QPushButton* m_btnAddConflict = nullptr;
     QPushButton* m_btnClearConflicts = nullptr;
 
-    QPushButton* m_btnApplySettings = nullptr;
 
     // Hotkeys
     QKeySequenceEdit* m_keyNext = nullptr;

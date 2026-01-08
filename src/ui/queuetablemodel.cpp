@@ -76,13 +76,12 @@ void QueueTableModel::setActions(const QVector<ActionItem>& actions)
     beginResetModel();
     m_actions = actions;
 
-    QHash<QString, QVector<int>> ledByFlow;
+    QHash<QString, QVector<QVector<int>>> ledByFlow;
     for (const auto& a : m_actions)
     {
         if (a.type != ActionType::L)
             continue;
-        if (!ledByFlow.contains(a.flowName))
-            ledByFlow.insert(a.flowName, a.ledColors);
+        ledByFlow[a.flowName].push_back(a.ledColors);
     }
 
     for (auto& r : m_rows)
@@ -92,13 +91,17 @@ void QueueTableModel::setActions(const QVector<ActionItem>& actions)
         const auto it = ledByFlow.constFind(r.flow);
         if (it == ledByFlow.constEnd())
             continue;
-        const QVector<int>& colors = it.value();
-        for (int i = 0; i < r.ledColumns.size() && i < colors.size(); ++i)
+        const QVector<QVector<int>>& blocks = it.value();
+        int colIdx = 0;
+        for (const auto& colors : blocks)
         {
-            const int cellIdx = r.ledColumns[i];
-            if (cellIdx < 0 || cellIdx >= r.cells.size())
-                continue;
-            r.cells[cellIdx] = QString::number(colors[i]);
+            for (int i = 0; i < colors.size() && colIdx < r.ledColumns.size(); ++i, ++colIdx)
+            {
+                const int cellIdx = r.ledColumns[colIdx];
+                if (cellIdx < 0 || cellIdx >= r.cells.size())
+                    continue;
+                r.cells[cellIdx] = QString::number(colors[i]);
+            }
         }
     }
 
@@ -240,6 +243,35 @@ void QueueTableModel::setLedColorMap(const QHash<int, QColor>& colors)
         emit dataChanged(index(0, 1), index(rowCount() - 1, columnCount() - 1));
 }
 
+bool QueueTableModel::ledColorIndexAt(const QModelIndex& index, int* colorIndex) const
+{
+    if (!index.isValid())
+        return false;
+    if (index.row() < 0 || index.row() >= m_rows.size())
+        return false;
+    if (index.column() <= 0 || index.column() >= columnCount())
+        return false;
+
+    const DisplayRow& r = m_rows[index.row()];
+    if (r.isHeader)
+        return false;
+
+    const int cellIdx = index.column() - 1;
+    if (!r.ledColumns.contains(cellIdx))
+        return false;
+
+    bool ok = false;
+    const int v = r.cells.value(cellIdx).toInt(&ok);
+    if (!ok || v <= 0)
+        return false;
+    if (!m_ledColorMap.contains(v))
+        return false;
+
+    if (colorIndex)
+        *colorIndex = v;
+    return true;
+}
+
 int QueueTableModel::rowCount(const QModelIndex& parent) const
 {
     if (parent.isValid())
@@ -273,10 +305,10 @@ QVariant QueueTableModel::data(const QModelIndex& index, int role) const
     {
         if (col == 0)
         {
-            if (r.flowState == FlowState::Running)
-                return kRunningColor;
             if (r.rerunMarked)
                 return kRerunColor;
+            if (r.flowState == FlowState::Running)
+                return kRunningColor;
             if (r.flowState == FlowState::Done)
                 return kDoneColor;
             return {};

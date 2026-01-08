@@ -7,6 +7,7 @@
 #include <QTableView>
 #include <QHeaderView>
 #include <QLabel>
+#include <QFontMetrics>
 #include <QGroupBox>
 #include <QComboBox>
 #include <QSpinBox>
@@ -29,12 +30,17 @@
 #include <QApplication>
 #include <QAbstractButton>
 #include <QAbstractItemView>
+#include <QAbstractItemModel>
 #include <QAbstractSpinBox>
 #include <QTabBar>
 #include <QScrollBar>
 #include <QSlider>
 #include <QSignalBlocker>
 #include <QSet>
+#include <QTimer>
+#include <QSerialPortInfo>
+#include <QCloseEvent>
+#include <QKeyEvent>
 
 #include "src/config/appsettings.h"
 #include "src/services/serialservice.h"
@@ -61,6 +67,11 @@ MainWindow::MainWindow(QWidget *parent)
     wireSignals();
     qApp->installEventFilter(this);
 
+    m_portRefreshTimer = new QTimer(this);
+    m_portRefreshTimer->setInterval(500);
+    connect(m_portRefreshTimer, &QTimer::timeout, this, &MainWindow::onRefreshPorts);
+    m_portRefreshTimer->start();
+
     // Models / delegates
     m_queueModel = new QueueTableModel(this);
     m_tblQueue->setModel(m_queueModel);
@@ -73,16 +84,14 @@ MainWindow::MainWindow(QWidget *parent)
     m_conflictDelegate = new ConflictColorDelegate(m_colorModel, this);
     for (int c = 0; c < 3; ++c)
         m_tblConflicts->setItemDelegateForColumn(c, m_conflictDelegate);
+    connect(m_conflictModel, &QAbstractItemModel::dataChanged,
+            this, &MainWindow::onConflictDataChanged);
 
     if (m_settings)
     {
         m_excelPath = m_settings->lastExcelPath;
         m_editExcelPath->setText(m_excelPath);
         // serial
-        m_cmbBaud->setCurrentText(QString::number(m_settings->serial.baud));
-        m_cmbDataBits->setCurrentText(QString::number(m_settings->serial.dataBits));
-        m_cmbParity->setCurrentText(m_settings->serial.parity);
-        m_cmbStopBits->setCurrentText(QString::number(m_settings->serial.stopBits));
         // device
         m_spOnMs->setValue(m_settings->device.onMs);
         m_spGapMs->setValue(m_settings->device.gapMs);
@@ -145,6 +154,33 @@ void MainWindow::buildUi()
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event)
 {
+    if (m_tblConflicts && isRunActive())
+    {
+        const QWidget* w = qobject_cast<QWidget*>(obj);
+        const bool onConflicts = w && (w == m_tblConflicts || w == m_tblConflicts->viewport()
+                                       || m_tblConflicts->isAncestorOf(w));
+        if (onConflicts && event->type() == QEvent::MouseButtonDblClick)
+        {
+            blockConflictEditIfRunning();
+            return true;
+        }
+        if (onConflicts && event->type() == QEvent::KeyPress)
+        {
+            auto* keyEvent = static_cast<QKeyEvent*>(event);
+            const int key = keyEvent->key();
+            const bool navKey = (key == Qt::Key_Up || key == Qt::Key_Down
+                                 || key == Qt::Key_Left || key == Qt::Key_Right
+                                 || key == Qt::Key_PageUp || key == Qt::Key_PageDown
+                                 || key == Qt::Key_Home || key == Qt::Key_End
+                                 || key == Qt::Key_Tab || key == Qt::Key_Backtab);
+            if (!navKey)
+            {
+                blockConflictEditIfRunning();
+                return true;
+            }
+        }
+    }
+
     if (event->type() == QEvent::MouseButtonPress)
     {
         auto* mouseEvent = static_cast<QMouseEvent*>(event);
@@ -203,14 +239,29 @@ QWidget* MainWindow::buildStatusPage()
     auto* root = new QVBoxLayout(page);
 
     auto* top = new QHBoxLayout();
+    auto* gbSerial = new QGroupBox(tr("串口设置"), page);
+    auto* gSerial = new QGridLayout(gbSerial);
+    m_cmbPort = new QComboBox(gbSerial);
+    m_btnOpenClose = new QPushButton(tr("打开串口"), gbSerial);
+    gSerial->addWidget(new QLabel(tr("端口"), gbSerial), 0, 0);
+    gSerial->addWidget(m_cmbPort, 0, 1);
+    gSerial->addWidget(m_btnOpenClose, 0, 2);
+
+    auto* configWrap = new QWidget(page);
+    auto* configRow = new QHBoxLayout(configWrap);
+    configRow->setContentsMargins(0, 0, 0, 0);
     m_editExcelPath = new QLineEdit(page);
     m_editExcelPath->setReadOnly(true);
     m_btnPickExcel = new QPushButton(tr("选择文件"), page);
     m_btnApplyConfig = new QPushButton(tr("应用配置"), page);
-    top->addWidget(new QLabel(tr("配置文件"), page));
-    top->addWidget(m_editExcelPath, 1);
-    top->addWidget(m_btnPickExcel);
-    top->addWidget(m_btnApplyConfig);
+    configRow->addWidget(new QLabel(tr("配置文件"), page));
+    configRow->addWidget(m_editExcelPath, 1);
+    configRow->addWidget(m_btnPickExcel);
+    configRow->addWidget(m_btnApplyConfig);
+    configWrap->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+
+    top->addWidget(gbSerial, 0);
+    top->addWidget(configWrap, 1);
 
     auto* mid = new QHBoxLayout();
     auto* left = new QVBoxLayout();
@@ -258,30 +309,6 @@ QWidget* MainWindow::buildSettingsPage()
     auto* left = new QVBoxLayout();   // 串口 + 设备
     auto* middle = new QVBoxLayout(); // 快捷键 + 测试
     auto* right = new QVBoxLayout();  // 颜色表 + 冲突表
-    // Serial box
-    auto* gbSerial = new QGroupBox(tr("串口设置"), page);
-    auto* gSerial = new QGridLayout(gbSerial);
-    m_cmbPort = new QComboBox(gbSerial);
-    m_cmbBaud = new QComboBox(gbSerial);
-    m_cmbBaud->addItems({"9600","19200","38400","57600","115200","230400","460800","921600"});
-    m_cmbBaud->setCurrentText("115200");
-    m_cmbDataBits = new QComboBox(gbSerial);
-    m_cmbDataBits->addItems({"8","7"});
-    m_cmbDataBits->setCurrentText("8");
-    m_cmbParity = new QComboBox(gbSerial);
-    m_cmbParity->addItems({"None","Even","Odd"});
-    m_cmbStopBits = new QComboBox(gbSerial);
-    m_cmbStopBits->addItems({"1","2"});
-    m_btnRefreshPorts = new QPushButton(tr("刷新串口"), gbSerial);
-    m_btnOpenClose = new QPushButton(tr("打开串口"), gbSerial);
-
-    int r=0;
-    gSerial->addWidget(new QLabel(tr("端口"), gbSerial), r,0); gSerial->addWidget(m_cmbPort,r,1); gSerial->addWidget(m_btnRefreshPorts,r,2); r++;
-    gSerial->addWidget(new QLabel(tr("波特率"), gbSerial), r,0); gSerial->addWidget(m_cmbBaud,r,1); gSerial->addWidget(m_btnOpenClose,r,2); r++;
-    gSerial->addWidget(new QLabel(tr("数据位"), gbSerial), r,0); gSerial->addWidget(m_cmbDataBits,r,1); r++;
-    gSerial->addWidget(new QLabel(tr("校验"), gbSerial), r,0); gSerial->addWidget(m_cmbParity,r,1); r++;
-    gSerial->addWidget(new QLabel(tr("停止位"), gbSerial), r,0); gSerial->addWidget(m_cmbStopBits,r,1); r++;
-
     // Device box (11 fields)
     auto* gbDev = new QGroupBox(tr("设备属性"), page);
     auto* gDev = new QGridLayout(gbDev);
@@ -387,11 +414,6 @@ QWidget* MainWindow::buildSettingsPage()
     confBtns->addStretch(1);
     vConf->addLayout(confBtns);
     vConf->addWidget(m_tblConflicts, 1);
-    m_btnApplySettings = new QPushButton(tr("应用"), gbConf);
-    auto* applyRow = new QHBoxLayout();
-    applyRow->addStretch(1);
-    applyRow->addWidget(m_btnApplySettings);
-    vConf->addLayout(applyRow);
 
     // Hotkeys
     auto* gbHot = new QGroupBox(tr("快捷键"), page);
@@ -449,7 +471,6 @@ QWidget* MainWindow::buildSettingsPage()
     gTest->addWidget(m_cmbVoiceTestStyle, rt, 2);
     gTest->addWidget(m_btnTestVoice, rt, 3); rt++;
 
-    left->addWidget(gbSerial);
     left->addWidget(gbDev);
     left->addWidget(gbVoice);
     left->addStretch(1);
@@ -483,7 +504,6 @@ void MainWindow::wireSignals()
     connect(m_btnReset, &QPushButton::clicked, this, &MainWindow::onReset);
 
     // serial
-    connect(m_btnRefreshPorts, &QPushButton::clicked, this, &MainWindow::onRefreshPorts);
     connect(m_btnOpenClose, &QPushButton::clicked, this, &MainWindow::onOpenCloseSerial);
     connect(m_cmbPort, &QComboBox::currentTextChanged, this, &MainWindow::onPortSelectionChanged);
     connect(m_serial, &SerialService::portsUpdated, this, &MainWindow::onPortsUpdated);
@@ -504,7 +524,6 @@ void MainWindow::wireSignals()
     connect(m_btnClearConflicts, &QPushButton::clicked, this, &MainWindow::onClearConflicts);
 
     // hotkeys
-    connect(m_btnApplySettings, &QPushButton::clicked, this, &MainWindow::onApplySettings);
     auto bindHotkeyEdit = [&](QKeySequenceEdit* edit){
         if (!edit) return;
         connect(edit, &QKeySequenceEdit::keySequenceChanged, this, &MainWindow::updateHotkeyDuplicateHints);
@@ -519,6 +538,10 @@ void MainWindow::wireSignals()
     connect(m_btnTestLed, &QPushButton::clicked, this, &MainWindow::onTestLed);
     connect(m_btnTestBeep, &QPushButton::clicked, this, &MainWindow::onTestBeep);
     connect(m_btnTestVoice, &QPushButton::clicked, this, &MainWindow::onTestVoice);
+
+    // view interactions
+    connect(m_tblQueue, &QTableView::doubleClicked, this, &MainWindow::onQueueCellDoubleClicked);
+    connect(m_tblColors, &QTableView::doubleClicked, this, &MainWindow::onColorTableDoubleClicked);
 
     // engine
     connect(m_engine, &WorkflowEngine::idle, this, &MainWindow::onEngineIdle);
@@ -570,6 +593,88 @@ void MainWindow::applyQueueColumnLayout()
     const int cols = m_queueModel->columnCount();
     for (int c = 0; c < cols; ++c)
         m_tblQueue->setColumnWidth(c, width);
+}
+
+void MainWindow::refreshQueueLedColors()
+{
+    if (!m_queueModel || !m_colorModel)
+        return;
+    QHash<int, QColor> map;
+    for (const auto& c : m_colorModel->colors())
+    {
+        if (c.index > 0 && c.rgb.isValid())
+            map.insert(c.index, c.rgb);
+    }
+    m_queueModel->setLedColorMap(map);
+    if (m_tblConflicts)
+        m_tblConflicts->viewport()->update();
+}
+
+bool MainWindow::isRunActive() const
+{
+    return (m_uiState == UiRunState::Started || m_uiState == UiRunState::Running);
+}
+
+bool MainWindow::blockConflictEditIfRunning()
+{
+    if (!isRunActive())
+        return false;
+    QMessageBox::warning(this, tr("提示"), tr("运行中无法修改冲突表"));
+    return true;
+}
+
+void MainWindow::syncConflictsFromModel(bool validate)
+{
+    if (!m_settings || !m_conflictModel)
+        return;
+    m_settings->conflicts = m_conflictModel->triples();
+    AppSettings::saveConflicts(m_settings->conflicts);
+    if (validate)
+        validateConflictsNow();
+}
+
+void MainWindow::validateConflictsNow()
+{
+    if (!m_settings || !m_importer)
+        return;
+    if (m_importer->actions().isEmpty())
+        return;
+    QString err;
+    if (!RandomColorResolver::precheckSolvable(m_importer->actions(),
+                                               m_settings->colors,
+                                               m_settings->conflicts,
+                                               m_settings->device.ledCount,
+                                               err))
+        QMessageBox::warning(this, tr("冲突表检查失败"), err);
+}
+
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    if (!m_settings)
+    {
+        QMainWindow::closeEvent(event);
+        return;
+    }
+
+    HotkeyConfig hk;
+    if (!collectHotkeys(hk, true))
+    {
+        event->ignore();
+        return;
+    }
+
+    m_settings->hotkeys = hk;
+    m_settings->serial.portName = m_cmbPort ? m_cmbPort->currentText() : QString();
+    m_settings->serial.baud = 115200;
+    m_settings->serial.dataBits = 8;
+    m_settings->serial.parity = QStringLiteral("None");
+    m_settings->serial.stopBits = 1;
+
+    updateDeviceVoiceColorsFromUi();
+    m_settings->conflicts = m_conflictModel->triples();
+    AppSettings::save(*m_settings);
+
+    QMainWindow::closeEvent(event);
 }
 
 bool MainWindow::loadSettings()
@@ -773,21 +878,51 @@ void MainWindow::onReset()
 // ================= Serial =================
 void MainWindow::onRefreshPorts()
 {
+    if (!m_serial)
+        return;
+
+    if (m_serial->isOpen())
+    {
+        const QString current = m_cmbPort ? m_cmbPort->currentText() : QString();
+        bool exists = false;
+        const auto infos = QSerialPortInfo::availablePorts();
+        for (const auto& info : infos)
+        {
+            if (info.portName() == current)
+            {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists)
+        {
+            m_serial->closePort();
+            m_serial->refreshPorts();
+        }
+        return;
+    }
+
     m_serial->refreshPorts();
 }
 
 void MainWindow::onPortsUpdated(const QStringList &ports)
 {
     const QSignalBlocker blocker(m_cmbPort);
+    QString preferred = m_cmbPort ? m_cmbPort->currentText() : QString();
+    if (preferred.isEmpty() && m_settings)
+        preferred = m_settings->serial.portName;
     m_cmbPort->clear();
     m_cmbPort->addItems(ports);
-    if (m_settings && !m_settings->serial.portName.isEmpty())
+    if (!preferred.isEmpty())
     {
-        const int idx = ports.indexOf(m_settings->serial.portName);
+        const int idx = ports.indexOf(preferred);
         if (idx >= 0)
+        {
             m_cmbPort->setCurrentIndex(idx);
+            return;
+        }
     }
-    if (m_cmbPort->currentIndex() < 0 && m_cmbPort->count() > 0)
+    if (m_cmbPort->count() > 0)
         m_cmbPort->setCurrentIndex(0);
 }
 
@@ -808,13 +943,13 @@ void MainWindow::onOpenCloseSerial()
     const QString port = m_cmbPort->currentText();
     if (port.isEmpty())
     {
-        QMessageBox::warning(this, tr("串口"), tr("未检测到串口，请刷新后选择端口"));
+        QMessageBox::warning(this, tr("串口"), tr("未检测到串口，请检查连接后再试"));
         return;
     }
-    const int baud = m_cmbBaud->currentText().toInt();
-    const int dataBits = m_cmbDataBits->currentText().toInt();
-    const QString parity = m_cmbParity->currentText();
-    const int stopBits = m_cmbStopBits->currentText().toInt();
+    const int baud = 115200;
+    const int dataBits = 8;
+    const QString parity = QStringLiteral("None");
+    const int stopBits = 1;
 
     m_serial->openPort(port, baud, dataBits, parity, stopBits);
 
@@ -907,10 +1042,10 @@ void MainWindow::onApplySettings()
 
     // serial
     m_settings->serial.portName = m_cmbPort->currentText();
-    m_settings->serial.baud = m_cmbBaud->currentText().toInt();
-    m_settings->serial.dataBits = m_cmbDataBits->currentText().toInt();
-    m_settings->serial.parity = m_cmbParity->currentText();
-    m_settings->serial.stopBits = m_cmbStopBits->currentText().toInt();
+    m_settings->serial.baud = 115200;
+    m_settings->serial.dataBits = 8;
+    m_settings->serial.parity = QStringLiteral("None");
+    m_settings->serial.stopBits = 1;
 
     updateDeviceVoiceColorsFromUi();
 
@@ -932,6 +1067,59 @@ void MainWindow::onApplySettings()
     AppSettings::save(*m_settings);
 
     sendConfigsToDevice(false);
+}
+
+void MainWindow::onQueueCellDoubleClicked(const QModelIndex& index)
+{
+    if (!m_queueModel || !m_colorModel)
+        return;
+
+    int colorIndex = 0;
+    if (!m_queueModel->ledColorIndexAt(index, &colorIndex))
+        return;
+
+    QColor current;
+    for (const auto& c : m_colorModel->colors())
+    {
+        if (c.index == colorIndex)
+        {
+            current = c.rgb;
+            break;
+        }
+    }
+    if (!current.isValid())
+        return;
+
+    const QColor chosen = QColorDialog::getColor(current, this, tr("选择颜色"));
+    if (!chosen.isValid() || chosen == current)
+        return;
+
+    if (!m_colorModel->updateColorByIndex(colorIndex, chosen))
+        return;
+    if (m_settings)
+        m_settings->colors = m_colorModel->colors();
+    refreshQueueLedColors();
+}
+
+void MainWindow::onColorTableDoubleClicked(const QModelIndex& index)
+{
+    if (!m_colorModel || !index.isValid())
+        return;
+    const int row = index.row();
+    const auto colors = m_colorModel->colors();
+    if (row < 0 || row >= colors.size())
+        return;
+
+    const QColor current = colors[row].rgb;
+    const QColor chosen = QColorDialog::getColor(current, this, tr("选择颜色"));
+    if (!chosen.isValid() || chosen == current)
+        return;
+
+    if (!m_colorModel->updateColorByIndex(colors[row].index, chosen))
+        return;
+    if (m_settings)
+        m_settings->colors = m_colorModel->colors();
+    refreshQueueLedColors();
 }
 
 // ================= Hotkeys & Tests =================
@@ -1333,6 +1521,7 @@ void MainWindow::onAddColor()
     }
     m_settings->colors = m_colorModel->colors();
     m_conflictModel->setMaxColorIndex(m_colorModel->rowCount());
+    refreshQueueLedColors();
 }
 
 void MainWindow::onDeleteColor()
@@ -1361,6 +1550,7 @@ void MainWindow::onDeleteColor()
     m_conflictModel->setMaxColorIndex(m_colorModel->rowCount());
     m_conflictModel->setTriples(triples);
     m_settings->conflicts = m_conflictModel->triples();
+    refreshQueueLedColors();
 }
 
 void MainWindow::onSaveColors()
@@ -1379,14 +1569,17 @@ void MainWindow::onClearColors()
     m_conflictModel->setMaxColorIndex(0);
     m_conflictModel->clearAll();
     m_settings->conflicts.clear();
+    refreshQueueLedColors();
 }
 
 // ================= Conflicts =================
 void MainWindow::onAddConflict()
 {
     if (!m_settings) return;
+    if (blockConflictEditIfRunning())
+        return;
     m_conflictModel->insertRow(m_conflictModel->rowCount());
-    m_settings->conflicts = m_conflictModel->triples();
+    syncConflictsFromModel(true);
 }
 
 void MainWindow::onSaveConflicts()
@@ -1399,8 +1592,29 @@ void MainWindow::onSaveConflicts()
 void MainWindow::onClearConflicts()
 {
     if (!m_settings) return;
+    if (blockConflictEditIfRunning())
+        return;
     m_conflictModel->clearAll();
-    m_settings->conflicts.clear();
+    syncConflictsFromModel(true);
+}
+
+void MainWindow::onConflictDataChanged(const QModelIndex& topLeft,
+                                       const QModelIndex& bottomRight,
+                                       const QVector<int>& roles)
+{
+    Q_UNUSED(topLeft);
+    Q_UNUSED(bottomRight);
+    Q_UNUSED(roles);
+    if (blockConflictEditIfRunning())
+    {
+        if (m_settings && m_conflictModel)
+        {
+            QSignalBlocker blocker(m_conflictModel);
+            m_conflictModel->setTriples(m_settings->conflicts);
+        }
+        return;
+    }
+    syncConflictsFromModel(true);
 }
 
 // ================= Engine callbacks =================

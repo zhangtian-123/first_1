@@ -6,10 +6,10 @@
  * Excel rules (summarised):
  * - Only .xlsx is accepted; only the first sheet is read.
  * - A header row can appear multiple times. Any row containing header tokens
- *   (LED/BEEP/VOICE/风格/DELAY/工作模式/LEDn) is treated as a header row.
+ *   (LED工作模式/BEEP/VOICE/风格/DELAY/LEDn) is treated as a header row.
  * - Data rows belong to the most recent header row; parsing stops at the first empty row.
  * - Header order defines the WORK action order for that block.
- * - LED block header is: LED | 工作模式 | LED1..LEDn (n is dynamic per block).
+ * - LED block header is: LED工作模式 | LED1..LEDn (n is dynamic per block).
  * - BEEP is 1 column; VOICE is 2 columns (VOICE + 风格); DELAY is 1 column.
  * - LED cells allow 0/empty to mean "random"; work mode accepts ALL/SEQ/RAND (Chinese aliases allowed).
  */

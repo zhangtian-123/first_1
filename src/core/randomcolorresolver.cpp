@@ -5,12 +5,27 @@
 
 #include "randomcolorresolver.h"
 
+#include <QRandomGenerator>
 #include <QSet>
+#include <algorithm>
 
 static bool isLedModeValidUpper(const QString& m)
 {
     const QString u = m.trimmed().toUpper();
     return (u == "ALL" || u == "SEQ" || u == "RAND");
+}
+
+static void shuffleIntVector(QVector<int>& v)
+{
+    if (v.size() < 2)
+        return;
+    QRandomGenerator* gen = QRandomGenerator::global();
+    for (int i = v.size() - 1; i > 0; --i)
+    {
+        const int j = gen->bounded(i + 1);
+        if (i != j)
+            std::swap(v[i], v[j]);
+    }
 }
 
 QVector<int> RandomColorResolver::collectAvailableColorIndices(const QVector<ColorItem>& colorTable)
@@ -203,8 +218,11 @@ bool RandomColorResolver::solveOneLedAction(const QVector<int>& alignedColors,
 {
     errMsg.clear();
 
+    QVector<int> avail = availableColorIndices;
+    shuffleIntVector(avail);
+
     // 1) 固定颜色合法性（>0 的颜色必须存在于颜色表）
-    if (!validateFixedColorIndices(alignedColors, availableColorIndices, errMsg))
+    if (!validateFixedColorIndices(alignedColors, avail, errMsg))
         return false;
 
     // 2) 固定颜色本身是否已违反冲突（例如 fixed 同时含 1 和 2）
@@ -225,14 +243,14 @@ bool RandomColorResolver::solveOneLedAction(const QVector<int>& alignedColors,
         return true;
     }
 
-    if (availableColorIndices.isEmpty())
+    if (avail.isEmpty())
     {
         errMsg = QStringLiteral("需要随机颜色，但颜色表为空");
         return false;
     }
 
     // 4) 构建 groupsForColorLookup
-    QVector<QVector<int>> groupsForColorLookup = buildGroupsForColors(availableColorIndices, conflicts);
+    QVector<QVector<int>> groupsForColorLookup = buildGroupsForColors(avail, conflicts);
 
     // 5) 初始化 repColorByGroup：扫描固定颜色占用哪些冲突组
     QVector<int> repColorByGroup;
@@ -244,7 +262,7 @@ bool RandomColorResolver::solveOneLedAction(const QVector<int>& alignedColors,
         if (c <= 0) continue;
 
         // c 属于哪些组？
-        const int k = indexOfColor(availableColorIndices, c);
+        const int k = indexOfColor(avail, c);
         if (k < 0) continue; // 理论上不会发生（已校验存在）
         const QVector<int>& groups = groupsForColorLookup[k];
 
@@ -270,7 +288,7 @@ bool RandomColorResolver::solveOneLedAction(const QVector<int>& alignedColors,
 
     // 6) 回溯填充 0
     if (!backtrackFill(work, zeros, 0,
-                       availableColorIndices, conflicts,
+                       avail, conflicts,
                        repColorByGroup, groupsForColorLookup,
                        errMsg))
     {

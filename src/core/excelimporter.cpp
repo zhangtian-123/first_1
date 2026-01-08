@@ -108,7 +108,7 @@ static QString headerKey(const QString& text)
 
 static bool isTokenLed(const QString& text)
 {
-    return headerKey(text) == QStringLiteral("led");
+    return text.trimmed() == QStringLiteral("LED工作模式");
 }
 
 static bool isTokenBeep(const QString& text)
@@ -129,10 +129,7 @@ static bool isTokenDelay(const QString& text)
 static bool isTokenMode(const QString& text)
 {
     const QString t = text.trimmed();
-    if (t == QStringLiteral("工作模式"))
-        return true;
-    const QString k = headerKey(text);
-    return (k == QStringLiteral("mode") || k == QStringLiteral("workmode"));
+    return t == QStringLiteral("工作模式");
 }
 
 static bool isTokenStyle(const QString& text)
@@ -157,7 +154,7 @@ static bool isHeaderRow(const QVector<QString>& cells)
         if (cell.trimmed().isEmpty())
             continue;
         if (isTokenLed(cell) || isTokenBeep(cell) || isTokenVoice(cell)
-            || isTokenDelay(cell) || isTokenMode(cell) || isTokenStyle(cell))
+            || isTokenDelay(cell) || isTokenStyle(cell))
             return true;
         if (ledRegex.match(cell).hasMatch())
             return true;
@@ -190,13 +187,7 @@ struct BlockDef
 struct HeaderDef
 {
     QVector<BlockDef> blocks;
-    QVector<int> ledCols; // absolute Excel columns (1-based)
-    int ledMarkerCol = -1;
-    int modeCol = -1;
-    int voiceCol = -1;
-    int voiceStyleCol = -1;
-    int delayCol = -1;
-    int beepCol = -1;
+    QVector<int> ledCols; // absolute Excel columns (1-based), all LED columns across blocks
 };
 }
 
@@ -208,11 +199,6 @@ static bool parseHeaderRow(const QVector<QString>& cells,
 {
     out = HeaderDef();
     errMsg.clear();
-
-    bool hasLed = false;
-    bool hasBeep = false;
-    bool hasVoice = false;
-    bool hasDelay = false;
 
     QRegularExpression ledRegex(QStringLiteral("^LED(\\d+)$"), QRegularExpression::CaseInsensitiveOption);
 
@@ -228,20 +214,10 @@ static bool parseHeaderRow(const QVector<QString>& cells,
 
         if (isTokenLed(text))
         {
-            if (hasLed)
-            {
-                errMsg = QStringLiteral("Header row has multiple LED blocks.");
-                return false;
-            }
-            const int modeCol = col + 1;
-            if (modeCol > lastCol || !isTokenMode(cells[modeCol - firstCol]))
-            {
-                errMsg = QStringLiteral("LED block must be followed by 工作模式.");
-                return false;
-            }
+            const int modeCol = col;
 
             QVector<int> ledCols;
-            int scan = modeCol + 1;
+            int scan = col + 1;
             while (scan <= lastCol)
             {
                 const QString h = cells[scan - firstCol].trimmed();
@@ -259,7 +235,7 @@ static bool parseHeaderRow(const QVector<QString>& cells,
 
             if (ledCols.isEmpty())
             {
-                errMsg = QStringLiteral("LED block must contain LED1..LEDn columns.");
+                errMsg = QStringLiteral("LED工作模式 must be followed by LED1..LEDn columns.");
                 return false;
             }
 
@@ -281,38 +257,24 @@ static bool parseHeaderRow(const QVector<QString>& cells,
             b.modeCol = modeCol;
             b.ledCols = ledCols;
             out.blocks.push_back(b);
-            out.ledCols = ledCols;
-            out.ledMarkerCol = col;
-            out.modeCol = modeCol;
-            hasLed = true;
+            for (int c : ledCols)
+                out.ledCols.push_back(c);
             col = scan;
             continue;
         }
 
         if (isTokenBeep(text))
         {
-            if (hasBeep)
-            {
-                errMsg = QStringLiteral("Header row has multiple BEEP columns.");
-                return false;
-            }
             BlockDef b;
             b.type = BlockType::Beep;
             b.beepCol = col;
             out.blocks.push_back(b);
-            out.beepCol = col;
-            hasBeep = true;
             ++col;
             continue;
         }
 
         if (isTokenVoice(text))
         {
-            if (hasVoice)
-            {
-                errMsg = QStringLiteral("Header row has multiple VOICE blocks.");
-                return false;
-            }
             const int styleCol = col + 1;
             if (styleCol > lastCol || !isTokenStyle(cells[styleCol - firstCol]))
             {
@@ -324,26 +286,16 @@ static bool parseHeaderRow(const QVector<QString>& cells,
             b.voiceCol = col;
             b.voiceStyleCol = styleCol;
             out.blocks.push_back(b);
-            out.voiceCol = col;
-            out.voiceStyleCol = styleCol;
-            hasVoice = true;
             col = styleCol + 1;
             continue;
         }
 
         if (isTokenDelay(text))
         {
-            if (hasDelay)
-            {
-                errMsg = QStringLiteral("Header row has multiple DELAY columns.");
-                return false;
-            }
             BlockDef b;
             b.type = BlockType::Delay;
             b.delayCol = col;
             out.blocks.push_back(b);
-            out.delayCol = col;
-            hasDelay = true;
             ++col;
             continue;
         }
@@ -513,10 +465,18 @@ bool ExcelImporter::loadXlsx(const QString &path, QString &errMsg)
                 errMsg = QStringLiteral("Row %1: %2").arg(r).arg(headerErr);
                 return false;
             }
-            if (!parsed.ledCols.isEmpty() && parsed.ledCols.size() > 20)
+            int headerLedMax = 0;
+            for (const auto& block : parsed.blocks)
             {
-                errMsg = QStringLiteral("Row %1: LED column count exceeds the limit (20).").arg(r);
-                return false;
+                if (block.type != BlockType::Led)
+                    continue;
+                const int count = block.ledCols.size();
+                if (count > 20)
+                {
+                    errMsg = QStringLiteral("Row %1: LED column count exceeds the limit (20).").arg(r);
+                    return false;
+                }
+                headerLedMax = std::max(headerLedMax, count);
             }
 
             ExcelTableRow row;
@@ -527,7 +487,7 @@ bool ExcelImporter::loadXlsx(const QString &path, QString &errMsg)
 
             currentHeader = parsed;
             hasHeader = true;
-            m_ledColumnCount = std::max(m_ledColumnCount, static_cast<int>(parsed.ledCols.size()));
+            m_ledColumnCount = std::max(m_ledColumnCount, headerLedMax);
             int lastNonEmpty = -1;
             for (int i = row.cells.size() - 1; i >= 0; --i)
             {
